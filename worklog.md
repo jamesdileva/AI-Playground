@@ -21,6 +21,6 @@
 
 ## Known limitations / follow-ups
 
-- Hosted CI green on origin is pending the first push (workflow exists; local sequence already green twice).
+- Hosted CI verified green on origin after push: run 35215567612, both OS jobs passed (0 vulnerabilities, 6/6 tests). Minor follow-up: bump actions/checkout and actions/setup-node to Node 24–compatible majors to silence the deprecation warning.
 - Process-level checks (stdout secrecy in production, signal shutdown, startup failure output) are not yet automated; documented as a coverage gap for a later sprint, not an observed defect.
 - hangout.db currently holds only seed data (agents=0, messages=0, counters=0), so deleting it before S1 costs nothing.
