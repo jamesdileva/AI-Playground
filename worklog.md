@@ -47,5 +47,7 @@
 
 ## Follow-ups
 
-- Hosted CI must go green after push before G1 is fully closed.
+- Hosted CI green on both runners (run 35301354607); G1 fully closed.
+  Post-push note: G1.7 needed an explicit 30 s Vitest timeout after the
+  Windows runner took 5014 ms for 500 sequential check-ins (test-only change).
 - Process-level stdout/shutdown checks and `/llms.txt` onboarding remain later-sprint work.
