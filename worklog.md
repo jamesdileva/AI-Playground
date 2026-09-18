@@ -1,4 +1,4 @@
-﻿# Worklog - Sprint 0 (2026-09-17)
+﻿# Worklog - Sprints 0-1 (2026-09-17)
 
 ## What was done
 
@@ -24,3 +24,28 @@
 - Hosted CI verified green on origin after push: run 35215567612, both OS jobs passed (0 vulnerabilities, 6/6 tests). Minor follow-up: bump actions/checkout and actions/setup-node to Node 24–compatible majors to silence the deprecation warning.
 - Process-level checks (stdout secrecy in production, signal shutdown, startup failure output) are not yet automated; documented as a coverage gap for a later sprint, not an observed defect.
 - hangout.db currently holds only seed data (agents=0, messages=0, counters=0), so deleting it before S1 costs nothing.
+
+# Sprint 1 (2026-09-17) — Check-in and the counter
+
+## What was done
+
+- Added `src/door/`: UUID agent ids, `adjective-animal-NN` handles with collision retry and profanity blocklist, 256-bit `hng_` tokens stored as SHA-256 only, atomic immediate transactions for new and returning check-ins.
+- Added `src/http/auth.ts`, `src/http/throttle.ts`, `src/http/errors.ts`: bearer auth with constant-time comparison, real-IP 10/min sliding-window throttle, uniform `HttpError` shape with `Retry-After` header.
+- Wired `POST /api/checkin` (optional returning-agent auth, strict body validation, 4 KB limit, `no-store`) and public `GET /api/stats`; request logs now record only known API routes plus agent id.
+- Tests: `tests/checkin.test.ts` covers G1.1-G1.4 and G1.6-G1.8 over real HTTP, including 100 sequential, 3x50 parallel, 500-handle, injected-clock throttle-expiry, body rejection, hash-equality, and preferred-handle fallback coverage.
+- Verified G1 locally: pipeline green, 16 tests, manual DB byte-scan and log inspection clean. Record: `gates/G1-2026-09-17.md`.
+
+## Decisions and why
+
+- UUIDs instead of ULIDs: zero new dependencies and sufficient for an opaque anonymous identifier; no ordering requirement exists for agent ids.
+- `/api/stats` stays public per API spec; an earlier draft wrongly required auth and was corrected, with auth-error coverage moved to a fixture route.
+- Returning agents reuse `POST /api/checkin` with their bearer token rather than a separate endpoint: it matches the spec's insert-or-update wording, keeps cold-start behavior simple, and omits the token on repeat visits.
+- Real client-IP throttling via server connection info, with no `X-Forwarded-For` trust; bulk tests inject an explicit high limit plus a fake clock, while the default 10/min path and window expiry are tested separately.
+- Database failures map to generic `503 unavailable` with `retry_after`; this prevents SQLite internals and tokens from leaking through error responses.
+- `occupants_now` remains deferred until presence exists in S3; stats exposes only implemented counters.
+- No new runtime dependencies: body limiting and connection info are subpath imports of already-installed Hono packages.
+
+## Follow-ups
+
+- Hosted CI must go green after push before G1 is fully closed.
+- Process-level stdout/shutdown checks and `/llms.txt` onboarding remain later-sprint work.
