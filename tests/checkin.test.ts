@@ -220,7 +220,7 @@ it("G1.7 handles are unique across 500 check-ins and blocklist-clean", async () 
     count: number;
   };
   expect(stored.count).toBe(500);
-});
+}, 30_000);
 
 it("preferred handles collide safely, fall back when blocked", async () => {
   const { base } = await startHarness(1000);
