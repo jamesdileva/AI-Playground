@@ -93,5 +93,5 @@
 
 ## Follow-ups
 
-- Hosted CI must go green after push before G2 is fully closed.
+- Hosted CI green on both runners (run 35411949293); G2 fully closed.
 - S3 next: waiters, presence, and abuse controls on top of these endpoints.
