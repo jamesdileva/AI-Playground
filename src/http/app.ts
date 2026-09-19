@@ -3,9 +3,15 @@ import { bodyLimit } from "hono/body-limit";
 import type Database from "better-sqlite3";
 import { readFileSync } from "node:fs";
 import { HttpError, databaseOperation } from "./errors.js";
-import { authenticate, type AuthedAgent } from "./auth.js";
+import { authenticate, requireAuth, type AuthedAgent } from "./auth.js";
 import { ipThrottle } from "./throttle.js";
 import { checkin, recheckin } from "../door/checkin.js";
+import {
+  listRooms,
+  postMessage,
+  readMessages,
+  resolveRoom,
+} from "../room/queries.js";
 
 const { version } = JSON.parse(
   readFileSync(new URL("../../package.json", import.meta.url), "utf8"),
@@ -45,9 +51,14 @@ export function createApp(
     const pathname = new URL(c.req.url).pathname;
     log({
       event: "request",
-      route: ["/api/health", "/api/checkin", "/api/stats"].includes(pathname)
-        ? pathname
-        : "/redacted",
+      route:
+        pathname === "/api/health" ||
+        pathname === "/api/checkin" ||
+        pathname === "/api/stats" ||
+        pathname === "/api/rooms" ||
+        pathname.startsWith("/api/rooms/")
+          ? pathname
+          : "/redacted",
       status: c.res.status,
       ms: Math.round(performance.now() - start),
       agent_id: agent?.agentId ?? null,
@@ -227,5 +238,135 @@ export function createApp(
       uptime_s: Math.floor(process.uptime()),
     });
   });
+  app.get("/api/rooms", (c) => {
+    c.header("Cache-Control", "no-store");
+    const rooms = listRooms(db);
+    const totalCheckins = databaseOperation(
+      () =>
+        (
+          db
+            .prepare(
+              "SELECT value FROM counters WHERE key = 'total_checkins'",
+            )
+            .get() as { value: number }
+        ).value,
+    );
+    return c.json({ total_checkins: totalCheckins, rooms });
+  });
+  app.get("/api/rooms/:slug/messages", (c) => {
+    c.header("Cache-Control", "no-store");
+    const room = resolveRoom(db, c.req.param("slug"));
+    const sinceRaw = c.req.query("since") ?? "0";
+    const limitRaw = c.req.query("limit") ?? "50";
+    if (!/^\d+$/.test(sinceRaw) || !Number.isSafeInteger(Number(sinceRaw))) {
+      throw new HttpError(
+        400,
+        "bad_cursor",
+        "Query parameter since must be a non-negative integer.",
+        "Send the next_cursor value from your last read, starting at 0.",
+      );
+    }
+    if (!/^\d+$/.test(limitRaw) || !Number.isSafeInteger(Number(limitRaw))) {
+      throw new HttpError(
+        400,
+        "bad_limit",
+        "Query parameter limit must be an integer between 1 and 200.",
+        "Send a limit from 1 to 200, or omit it for the default of 50.",
+      );
+    }
+    const since = Number(sinceRaw);
+    let limit = Number(limitRaw);
+    if (limit < 1) {
+      throw new HttpError(
+        400,
+        "bad_limit",
+        "Query parameter limit must be an integer between 1 and 200.",
+        "Send a limit from 1 to 200, or omit it for the default of 50.",
+      );
+    }
+    if (limit > 200) limit = 200;
+    const authorization = c.req.header("Authorization");
+    if (authorization !== undefined) {
+      const agent = authenticate(db, authorization);
+      databaseOperation(() =>
+        db
+          .prepare("UPDATE agents SET last_seen_at = ? WHERE id = ?")
+          .run(Date.now(), agent.agentId),
+      );
+      c.set("agent", agent);
+    }
+    const { messages, nextCursor, hasMore } = readMessages(
+      db,
+      room.id,
+      since,
+      limit,
+    );
+    return c.json({
+      room: room.slug,
+      messages,
+      next_cursor: nextCursor,
+      has_more: hasMore,
+    });
+  });
+  app.post(
+    "/api/rooms/:slug/messages",
+    requireAuth(db),
+    bodyLimit({
+      maxSize: 4096,
+      onError: () => {
+        throw new HttpError(
+          413,
+          "body_too_large",
+          "Request body exceeds 4096 bytes.",
+          "Send a smaller JSON object.",
+        );
+      },
+    }),
+    async (c) => {
+      c.header("Cache-Control", "no-store");
+      const room = resolveRoom(db, c.req.param("slug"));
+      const text = await c.req.text();
+      let input: unknown;
+      try {
+        input = text.length ? JSON.parse(text) : {};
+      } catch {
+        throw new HttpError(
+          400,
+          "invalid_json",
+          "Malformed JSON body.",
+          "Send a valid JSON object with a body string.",
+        );
+      }
+      if (
+        input === null ||
+        typeof input !== "object" ||
+        Array.isArray(input)
+      ) {
+        throw new HttpError(
+          400,
+          "body_invalid",
+          "Request body must be a JSON object.",
+          'Send a JSON object, e.g. {"body": "hello"}.',
+        );
+      }
+      const agent = c.get("agent");
+      const posted = postMessage(
+        db,
+        room.id,
+        agent,
+        (input as Record<string, unknown>).body,
+      );
+      return c.json(
+        {
+          id: posted.id,
+          room: room.slug,
+          handle: agent.handle,
+          created_at: posted.created_at,
+          next_cursor: posted.id,
+        },
+        201,
+      );
+    },
+  );
   return app;
 }

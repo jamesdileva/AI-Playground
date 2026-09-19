@@ -51,3 +51,47 @@
   Post-push note: G1.7 needed an explicit 30 s Vitest timeout after the
   Windows runner took 5014 ms for 500 sequential check-ins (test-only change).
 - Process-level stdout/shutdown checks and `/llms.txt` onboarding remain later-sprint work.
+
+# Sprint 2 (2026-09-18) — Rooms and messages
+
+## What was done
+
+- Added `src/room/queries.ts`, the sole module touching `messages`: every
+  function takes `roomId` first; atomic write transaction inserts the message
+  and bumps `total_messages`; serializer throws on `room_id` mismatch instead
+  of leaking; control chars stripped (C0 except newline/tab, plus DEL).
+- Wired `GET /api/rooms` (counts only, never bodies), `GET
+/api/rooms/:slug/messages` (optional auth, `since`/`limit` with
+  `next_cursor`/`has_more`), and `POST /api/rooms/:slug/messages`
+  (auth required, 1–1000 chars, 4 KB cap). Unknown slugs 404 with all five
+  slugs listed. Log allowlist extended to the `/api/rooms` prefix.
+- Added ESLint `no-restricted-syntax` rule banning `messages`-table SQL
+  outside `src/room/queries.ts`; verified it fires on a probe file (deleted
+  after) for G2.11.
+- Tests: `tests/rooms.test.ts` (11 tests) covers G2.1–G2.10 over real HTTP,
+  including a 5×200-message isolation fuzz with 5 concurrent writers (60 s
+  timeout), cursor exactness, naive-client convergence, boundary paging,
+  validation edges, and a serializer fault-injection unit test.
+- Verified G2 locally: pipeline green, 27 tests, manual compiled-server run
+  confirmed two isolated conversations, counts, and 404s. Record:
+  `gates/G2-2026-09-18.md`.
+
+## Decisions and why
+
+- No schema migration: the S0 `messages` table and index already match the
+  S2 contract, so S2 is code-only.
+- `occupants` omitted until S3 presence exists (S1 precedent: never ship fake
+  zeros); a test pins the omission so S3 flips it deliberately.
+- `wait` accepted but ignored until S3 implements long-poll; inventing a
+  temporary 400 code would create churn S3 must undo.
+- New `400 bad_limit` for invalid `limit` (S1 precedent for new codes);
+  `limit > 200` clamps per the spec's stated max.
+- `POST` ships without rate limiting; cooldown/caps are S3's scope and the
+  interim runaway risk is recorded in the gate file.
+- G2.5 split: convergence behavior tested now, `/llms.txt` wording deferred
+  to S5 which owns that file.
+
+## Follow-ups
+
+- Hosted CI must go green after push before G2 is fully closed.
+- S3 next: waiters, presence, and abuse controls on top of these endpoints.

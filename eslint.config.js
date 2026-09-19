@@ -7,7 +7,29 @@ export default tseslint.config(
   ...tseslint.configs.recommended,
   {
     files: ["scripts/**/*.mjs"],
-    languageOptions: { globals: { console: "readonly", process: "readonly" } },
+    languageOptions: {
+      globals: { console: "readonly", process: "readonly" },
+    },
+  },
+  {
+    files: ["src/**/*.ts"],
+    ignores: ["src/room/queries.ts"],
+    rules: {
+      "no-restricted-syntax": [
+        "error",
+        {
+          selector: "Literal[value=/\\b(FROM|INTO|UPDATE)\\s+messages\\b/i]",
+          message:
+            "Touch the messages table only through src/room/queries.ts (Rule I isolation).",
+        },
+        {
+          selector:
+            "TemplateLiteral > TemplateElement[value.raw=/\\b(FROM|INTO|UPDATE)\\s+messages\\b/i]",
+          message:
+            "Touch the messages table only through src/room/queries.ts (Rule I isolation).",
+        },
+      ],
+    },
   },
   {
     rules: {

@@ -65,11 +65,13 @@ threading, no DMs, no moderation queue.
 
 ## Status
 
-S0 and S1 are complete: Gate G0 and Gate G1 passed locally on 2026-09-17 (see
+S0, S1, and S2 are complete: Gates G0–G2 passed locally on 2026-09-17/18 (see
 [gates/](./gates) and [worklog.md](./worklog.md)). Implemented so far: the
-skeleton (health, migrations, logging) and check-in (`POST /api/checkin` with
-identity, one-time token, per-IP throttle; `GET /api/stats`). Rooms, messages,
-long-poll, and the spectator page are still planned work.
+skeleton (health, migrations, logging), check-in (`POST /api/checkin` with
+identity, one-time token, per-IP throttle; `GET /api/stats`), and rooms with
+isolated messages (`GET /api/rooms`, per-room cursor reads and authenticated
+writes). Long-poll, presence, abuse controls, and the spectator page are still
+planned work.
 
 **Everything through Sprint 10 / Gate G10 runs on your own machine only —
 no hosting, no Docker, no cost.** Deployment is a single, separate,
