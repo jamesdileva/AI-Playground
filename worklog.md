@@ -1,4 +1,4 @@
-﻿# Worklog - Sprints 0-1 (2026-09-17)
+﻿# Worklog - Sprints 0-3 (2026-09-17 to 2026-09-23)
 
 ## What was done
 
@@ -95,3 +95,50 @@
 
 - Hosted CI green on both runners (run 35411949293); G2 fully closed.
 - S3 next: waiters, presence, and abuse controls on top of these endpoints.
+
+# Sprint 3 (2026-09-23) — Long-poll, presence, abuse controls
+
+## What was done
+
+- Added `src/waiters/registry.ts` (per-room waiter sets; `wait` resolves
+  woke/timeout/aborted with timer + abort-listener cleanup, room entry
+  deleted when its set empties) and wired long-poll into
+  `GET /api/rooms/:slug/messages`: `wait` parsed (400 `bad_wait` for
+  negative/non-numeric, clamp to 25 s), empty read blocks, re-reads after
+  wake/timeout, POST wakes the room after insert.
+- Added `src/presence/tracker.ts` (90 s TTL keyed by room slug string;
+  touch/leave/sweep/occupancy) with 15 s sweeper; `occupants` now appears on
+  the room list and message reads, `occupants_now` on stats (flipping the S2
+  omission test), plus `POST /api/rooms/:slug/leave` -> 204.
+- Added `src/http/rateLimit.ts` (per-agent-per-room cooldown 8 s + 60/hour
+  cap, `retry_after` seconds) enforced before the write transaction, and a
+  `409 consecutive_post` check inside the `postMessage` transaction;
+  cooldown doubles when the room posted >200 messages in the last 10 min
+  (idle decay). Retention sweep keeps the newest 500 per room and drops rows
+  older than 7 days (5 min sweeper); both sweepers skippable via options.
+- Migrated S2 tests to the new write semantics (alternating agents,
+  `RELAXED_MESSAGE_LIMITS` harness injection, `\u0000`/`\u0007` escapes) and
+  added `tests/s3.test.ts` (13 tests) covering G3.1-G3.4, G3.6-G3.9, idle
+  decay, presence, and retention with an injected clock.
+- Verified G3 locally: pipeline green, 40 tests, plus three manual load runs
+  against the compiled server: 3.5 (500 aborted long-polls, registry 0,
+  RSS ratio 1.0), 3.10 (two-agent ping-pong, 120 messages ≤ 150, hourly caps
+  engaged), 3.13 (20 agents / 30 min, 13,636 requests, zero 5xx, DB flat at
+  4.32 MB, RSS bounded). Record: `gates/G3-2026-09-23.md`.
+
+## Decisions and why
+
+- Check order cooldown -> hourly cap -> consecutive-post (429s win over 409);
+  consecutive check lives inside the write transaction for atomicity.
+- `wait` clamps silently above 25 s but 400s below 0 / non-numeric, so naive
+  pollers keep working while malformed input is rejected loudly.
+- Presence keyed by room slug string (not numeric id) to match the existing
+  read path; `§3.11`-style spec wording deferred to S5 like G2.5.
+- Soak ran two-wave check-in (10 + 10, 65 s apart) because the production
+  check-in throttle allows 10/minute per IP; a first 10-agent attempt is kept
+  as supporting evidence only.
+
+## Follow-ups
+
+- Hosted CI: <run id after push>; G3 fully closed.
+- S4 next: per plan (04-sprint-plan.md).

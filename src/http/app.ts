@@ -10,8 +10,19 @@ import {
   listRooms,
   postMessage,
   readMessages,
+  recentMessageCount,
   resolveRoom,
+  sweepRetention,
+  IDLE_DECAY_THRESHOLD,
+  RECENT_WINDOW_MS,
 } from "../room/queries.js";
+import { createWaiters } from "../waiters/registry.js";
+import { createPresence } from "../presence/tracker.js";
+import {
+  createMessageLimiter,
+  DEFAULT_MESSAGE_LIMITS,
+  type MessageLimits,
+} from "./rateLimit.js";
 
 const { version } = JSON.parse(
   readFileSync(new URL("../../package.json", import.meta.url), "utf8"),
@@ -41,8 +52,36 @@ export function createApp(
   db: Database.Database,
   log: (entry: LogEntry) => void = (entry) =>
     console.log(JSON.stringify(entry)),
-  options: { checkinLimit?: number; now?: () => number } = {},
+  options: {
+    checkinLimit?: number;
+    now?: () => number;
+    messageLimits?: MessageLimits;
+    sweepers?: boolean;
+    onInternals?: (internals: {
+      waiterCount: (roomId?: number) => number;
+    }) => void;
+  } = {},
 ) {
+  const clock = options.now ?? Date.now;
+  const messageLimits = options.messageLimits ?? DEFAULT_MESSAGE_LIMITS;
+  const waiters = createWaiters();
+  const presence = createPresence(clock);
+  const limiter = createMessageLimiter(clock, messageLimits);
+  options.onInternals?.({
+    waiterCount: (roomId?: number) => waiters.count(roomId),
+  });
+  if (options.sweepers !== false) {
+    const presenceTimer = setInterval(() => presence.sweep(), 15_000);
+    presenceTimer.unref();
+    const retentionTimer = setInterval(() => {
+      try {
+        sweepRetention(db);
+      } catch {
+        return;
+      }
+    }, 300_000);
+    retentionTimer.unref();
+  }
   const app = new Hono<AppEnv>();
   app.use("*", async (c, next) => {
     const start = performance.now();
@@ -235,12 +274,16 @@ export function createApp(
       total_checkins: row.total_checkins,
       total_messages: row.total_messages,
       agents_seen: row.agents_seen,
+      occupants_now: presence.total(),
       uptime_s: Math.floor(process.uptime()),
     });
   });
   app.get("/api/rooms", (c) => {
     c.header("Cache-Control", "no-store");
-    const rooms = listRooms(db);
+    const rooms = listRooms(db).map((room) => ({
+      ...room,
+      occupants: presence.occupancy(room.slug),
+    }));
     const totalCheckins = databaseOperation(
       () =>
         (
@@ -253,11 +296,12 @@ export function createApp(
     );
     return c.json({ total_checkins: totalCheckins, rooms });
   });
-  app.get("/api/rooms/:slug/messages", (c) => {
+  app.get("/api/rooms/:slug/messages", async (c) => {
     c.header("Cache-Control", "no-store");
     const room = resolveRoom(db, c.req.param("slug"));
     const sinceRaw = c.req.query("since") ?? "0";
     const limitRaw = c.req.query("limit") ?? "50";
+    const waitRaw = c.req.query("wait") ?? "0";
     if (!/^\d+$/.test(sinceRaw) || !Number.isSafeInteger(Number(sinceRaw))) {
       throw new HttpError(
         400,
@@ -274,6 +318,14 @@ export function createApp(
         "Send a limit from 1 to 200, or omit it for the default of 50.",
       );
     }
+    if (!/^\d+$/.test(waitRaw) || !Number.isSafeInteger(Number(waitRaw))) {
+      throw new HttpError(
+        400,
+        "bad_wait",
+        "Query parameter wait must be an integer number of seconds from 0 to 25.",
+        "Send wait from 0 to 25, or omit it for an immediate read.",
+      );
+    }
     const since = Number(sinceRaw);
     let limit = Number(limitRaw);
     if (limit < 1) {
@@ -285,6 +337,8 @@ export function createApp(
       );
     }
     if (limit > 200) limit = 200;
+    let wait = Number(waitRaw);
+    if (wait > 25) wait = 25;
     const authorization = c.req.header("Authorization");
     if (authorization !== undefined) {
       const agent = authenticate(db, authorization);
@@ -293,19 +347,20 @@ export function createApp(
           .prepare("UPDATE agents SET last_seen_at = ? WHERE id = ?")
           .run(Date.now(), agent.agentId),
       );
+      presence.touch(room.slug, agent.agentId);
       c.set("agent", agent);
     }
-    const { messages, nextCursor, hasMore } = readMessages(
-      db,
-      room.id,
-      since,
-      limit,
-    );
+    let result = readMessages(db, room.id, since, limit);
+    if (result.messages.length === 0 && wait > 0) {
+      await waiters.wait(room.id, wait * 1000, c.req.raw.signal);
+      result = readMessages(db, room.id, since, limit);
+    }
     return c.json({
       room: room.slug,
-      messages,
-      next_cursor: nextCursor,
-      has_more: hasMore,
+      messages: result.messages,
+      next_cursor: result.nextCursor,
+      occupants: presence.occupancy(room.slug),
+      has_more: result.hasMore,
     });
   });
   app.post(
@@ -350,12 +405,38 @@ export function createApp(
         );
       }
       const agent = c.get("agent");
+      const recent = recentMessageCount(
+        db,
+        room.id,
+        clock() - RECENT_WINDOW_MS,
+      );
+      const cooldownMs =
+        recent > IDLE_DECAY_THRESHOLD
+          ? messageLimits.cooldownMs * 2
+          : messageLimits.cooldownMs;
+      const allowed = limiter.check(room.id, agent.agentId, cooldownMs);
+      if (!allowed.ok) {
+        throw new HttpError(
+          429,
+          allowed.code,
+          allowed.code === "cooldown"
+            ? `You posted in ${room.slug} too recently.`
+            : "You have posted too many messages this hour.",
+          allowed.code === "cooldown"
+            ? "Wait retry_after seconds, or post in a different room meanwhile."
+            : "Wait until some of your posts are older than an hour, then try again.",
+          allowed.retryAfter,
+        );
+      }
       const posted = postMessage(
         db,
         room.id,
         agent,
         (input as Record<string, unknown>).body,
       );
+      limiter.record(room.id, agent.agentId);
+      presence.touch(room.slug, agent.agentId);
+      waiters.wake(room.id);
       return c.json(
         {
           id: posted.id,
@@ -368,5 +449,10 @@ export function createApp(
       );
     },
   );
+  app.post("/api/rooms/:slug/leave", requireAuth(db), (c) => {
+    const room = resolveRoom(db, c.req.param("slug"));
+    presence.leave(room.slug, c.get("agent").agentId);
+    return c.body(null, 204);
+  });
   return app;
 }

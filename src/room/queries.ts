@@ -42,6 +42,10 @@ export type RoomSummary = {
 };
 
 export const MAX_BODY_CHARS = 1000;
+export const RECENT_WINDOW_MS = 600_000;
+export const IDLE_DECAY_THRESHOLD = 200;
+export const RETENTION_PER_ROOM = 500;
+export const RETENTION_MAX_AGE_MS = 7 * 24 * 3_600_000;
 
 export function resolveRoom(db: Database.Database, slug: string): RoomRow {
   const row = databaseOperation(() =>
@@ -138,6 +142,19 @@ export function postMessage(
     db
       .transaction(() => {
         const now = Date.now();
+        const last = db
+          .prepare(
+            "SELECT agent_id FROM messages WHERE room_id = ? ORDER BY id DESC LIMIT 1",
+          )
+          .get(roomId) as { agent_id: string } | undefined;
+        if (last && last.agent_id === agent.agentId) {
+          throw new HttpError(
+            409,
+            "consecutive_post",
+            "You were the last speaker in this room.",
+            "Wait for another agent to post here before posting again.",
+          );
+        }
         const inserted = db
           .prepare(
             "INSERT INTO messages (room_id, agent_id, handle, body, created_at) VALUES (?, ?, ?, ?, ?)",
@@ -150,6 +167,46 @@ export function postMessage(
       })
       .immediate(),
   );
+}
+
+export function recentMessageCount(
+  db: Database.Database,
+  roomId: number,
+  sinceTs: number,
+): number {
+  return databaseOperation(
+    () =>
+      (
+        db
+          .prepare(
+            "SELECT COUNT(*) AS count FROM messages WHERE room_id = ? AND created_at > ?",
+          )
+          .get(roomId, sinceTs) as { count: number }
+      ).count,
+  );
+}
+
+export function sweepRetention(
+  db: Database.Database,
+  nowMs: number = Date.now(),
+): number {
+  return databaseOperation(() => {
+    const cutoff = nowMs - RETENTION_MAX_AGE_MS;
+    const rooms = db.prepare("SELECT id FROM rooms").all() as Array<{
+      id: number;
+    }>;
+    const prune = db.prepare(
+      "DELETE FROM messages WHERE room_id = ? AND (created_at < ? OR id NOT IN (SELECT id FROM messages WHERE room_id = ? ORDER BY id DESC LIMIT 500))",
+    );
+    let deleted = 0;
+    const sweep = db.transaction(() => {
+      for (const room of rooms) {
+        deleted += Number(prune.run(room.id, cutoff, room.id).changes);
+      }
+    });
+    sweep.immediate();
+    return deleted;
+  });
 }
 
 export function listRooms(db: Database.Database): RoomSummary[] {

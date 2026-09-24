@@ -3,6 +3,7 @@ import type Database from "better-sqlite3";
 import { afterEach, expect, it } from "vitest";
 import { openDatabase } from "../src/database.js";
 import { createApp, type LogEntry } from "../src/http/app.js";
+import { RELAXED_MESSAGE_LIMITS } from "../src/http/rateLimit.js";
 import {
   ROOM_SLUGS,
   serializeRoomMessages,
@@ -23,7 +24,10 @@ type Harness = {
 async function startHarness(checkinLimit = 10000): Promise<Harness> {
   const db = openDatabase(":memory:");
   const logs: LogEntry[] = [];
-  const app = createApp(db, (entry) => logs.push(entry), { checkinLimit });
+  const app = createApp(db, (entry) => logs.push(entry), {
+    checkinLimit,
+    messageLimits: RELAXED_MESSAGE_LIMITS,
+  });
   const server = serve({ fetch: app.fetch, hostname: "127.0.0.1", port: 0 });
   await new Promise<void>((resolve, reject) => {
     server.once("listening", resolve);
@@ -157,18 +161,14 @@ it("G2.2 isolation fuzz: 200 tagged messages, 5 concurrent writers, 5 runs", asy
       const slug = ROOM_SLUGS[(run * 200 + n * 7 + 3) % 5]!;
       return { slug, body: `ZZ-${slug}-r${run}-n${n}` };
     });
+    const perRoomTurn = new Map<string, number>();
     for (let index = 0; index < plan.length; index += 5) {
       const results = await Promise.all(
-        plan
-          .slice(index, index + 5)
-          .map((message, offset) =>
-            post(
-              base,
-              message.slug,
-              tokens[(index + offset) % 5]!,
-              message.body,
-            ),
-          ),
+        plan.slice(index, index + 5).map((message) => {
+          const turn = perRoomTurn.get(message.slug) ?? 0;
+          perRoomTurn.set(message.slug, turn + 1);
+          return post(base, message.slug, tokens[turn % 5]!, message.body);
+        }),
       );
       for (const result of results) expect(result.status).toBe(201);
     }
@@ -204,15 +204,19 @@ it("G2.3 GET /api/rooms returns counts only, zero message bodies", async () => {
   const balcony = rooms.find((room) => room["slug"] === "balcony")!;
   expect(balcony["message_count"]).toBe(0);
   expect(balcony["last_activity_at"]).toBeNull();
-  expect("occupants" in kitchen).toBe(false);
+  expect(kitchen["occupants"]).toBe(1);
+  expect(balcony["occupants"]).toBe(0);
 });
 
 it("G2.4 cursors replay history exactly once with no gaps or duplicates", async () => {
   const { base } = await startHarness();
-  const agent = await newAgent(base);
+  const first = await newAgent(base);
+  const second = await newAgent(base);
   const ids: number[] = [];
-  for (const text of ["one", "two", "three"]) {
-    const posted = await post(base, "couch", agent.token, text);
+  const writers = [first.token, second.token, first.token];
+  for (const [index, text] of ["one", "two", "three"].entries()) {
+    const posted = await post(base, "couch", writers[index]!, text);
+    expect(posted.status).toBe(201);
     ids.push(posted.json["id"] as number);
   }
   const full = await read(base, "couch", "?since=0");
@@ -230,12 +234,13 @@ it("G2.4 cursors replay history exactly once with no gaps or duplicates", async 
 
 it("G2.5 naive since+1 clients still converge on the full history", async () => {
   const { base } = await startHarness();
-  const agent = await newAgent(base);
-  await post(base, "kitchen", agent.token, "k-one");
-  await post(base, "porch", agent.token, "p-one");
-  await post(base, "kitchen", agent.token, "k-two");
-  await post(base, "porch", agent.token, "p-two");
-  await post(base, "kitchen", agent.token, "k-three");
+  const first = await newAgent(base);
+  const second = await newAgent(base);
+  await post(base, "kitchen", first.token, "k-one");
+  await post(base, "porch", second.token, "p-one");
+  await post(base, "kitchen", second.token, "k-two");
+  await post(base, "porch", first.token, "p-two");
+  await post(base, "kitchen", first.token, "k-three");
   const seen: string[] = [];
   let since = 0;
   for (let step = 0; step < 100; step++) {
@@ -250,28 +255,35 @@ it("G2.5 naive since+1 clients still converge on the full history", async () => 
 
 it("G2.6 limit respected and has_more accurate at the boundary", async () => {
   const { base } = await startHarness();
-  const agent = await newAgent(base);
-  for (let n = 0; n < 5; n++) await post(base, "couch", agent.token, `m${n}`);
-  const first = await read(base, "couch", "?since=0&limit=2");
-  expect(first.json.messages.map((message) => message.body)).toEqual([
+  const first = await newAgent(base);
+  const second = await newAgent(base);
+  for (let n = 0; n < 5; n++)
+    await post(
+      base,
+      "couch",
+      n % 2 === 0 ? first.token : second.token,
+      `m${n}`,
+    );
+  const page1 = await read(base, "couch", "?since=0&limit=2");
+  expect(page1.json.messages.map((message) => message.body)).toEqual([
     "m0",
     "m1",
   ]);
-  expect(first.json.has_more).toBe(true);
-  const second = await read(
+  expect(page1.json.has_more).toBe(true);
+  const page2 = await read(
     base,
     "couch",
-    `?since=${first.json.next_cursor}&limit=2`,
+    `?since=${page1.json.next_cursor}&limit=2`,
   );
-  expect(second.json.messages.map((message) => message.body)).toEqual([
+  expect(page2.json.messages.map((message) => message.body)).toEqual([
     "m2",
     "m3",
   ]);
-  expect(second.json.has_more).toBe(true);
+  expect(page2.json.has_more).toBe(true);
   const third = await read(
     base,
     "couch",
-    `?since=${second.json.next_cursor}&limit=2`,
+    `?since=${page2.json.next_cursor}&limit=2`,
   );
   expect(third.json.messages.map((message) => message.body)).toEqual(["m4"]);
   expect(third.json.has_more).toBe(false);
@@ -282,7 +294,8 @@ it("G2.6 limit respected and has_more accurate at the boundary", async () => {
 
 it("G2.7 body validation boundaries and control-char stripping", async () => {
   const { base } = await startHarness();
-  const agent = await newAgent(base);
+  const first = await newAgent(base);
+  const second = await newAgent(base);
   const stats = async () =>
     (
       (await (await fetch(`${base}/api/stats`)).json()) as {
@@ -290,20 +303,20 @@ it("G2.7 body validation boundaries and control-char stripping", async () => {
       }
     ).total_messages;
   const before = await stats();
-  expect((await post(base, "kitchen", agent.token, "")).status).toBe(400);
+  expect((await post(base, "kitchen", first.token, "")).status).toBe(400);
   expect(
-    (await post(base, "kitchen", agent.token, "x".repeat(1001))).status,
+    (await post(base, "kitchen", first.token, "x".repeat(1001))).status,
   ).toBe(400);
   expect(
-    (await post(base, "kitchen", agent.token, "\u0000\u0007")).status,
+    (await post(base, "kitchen", first.token, "\u0000\u0007")).status,
   ).toBe(400);
   expect(await stats()).toBe(before);
-  const exact = await post(base, "kitchen", agent.token, "y".repeat(1000));
+  const exact = await post(base, "kitchen", first.token, "y".repeat(1000));
   expect(exact.status).toBe(201);
   const stripped = await post(
     base,
     "kitchen",
-    agent.token,
+    second.token,
     "a\u0000b\u0007c",
   );
   expect(stripped.status).toBe(201);
