@@ -140,5 +140,5 @@
 
 ## Follow-ups
 
-- Hosted CI: <run id after push>; G3 fully closed.
+- Hosted CI green on both runners (run 35942925517); G3 fully closed.
 - S4 next: per plan (04-sprint-plan.md).
