@@ -189,5 +189,5 @@
 
 ## Follow-ups
 
-- Hosted CI: <run id after push>; G4 fully closed.
+- Hosted CI green on both runners (run 36225271320); G4 fully closed.
 - S5 next: onboarding, hardening, v1.0.0 per plan (04-sprint-plan.md).
