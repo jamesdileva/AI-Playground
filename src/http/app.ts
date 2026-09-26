@@ -31,9 +31,9 @@ const { version } = JSON.parse(
 ) as { version: string };
 
 const STATIC_ASSETS = [
-  ["/", "index.html", "text/html; charset=utf-8"],
   ["/app.js", "app.js", "text/javascript; charset=utf-8"],
   ["/style.css", "style.css", "text/css; charset=utf-8"],
+  ["/llms.txt", "llms.txt", "text/plain; charset=utf-8"],
 ] as const;
 const staticBodies = new Map<string, { body: string; type: string }>();
 for (const [route, file, type] of STATIC_ASSETS) {
@@ -45,6 +45,10 @@ for (const [route, file, type] of STATIC_ASSETS) {
     type,
   });
 }
+const spectatorPage = readFileSync(
+  new URL("../../public/index.html", import.meta.url),
+  "utf8",
+);
 
 export type LogEntry = {
   event: string;
@@ -52,6 +56,12 @@ export type LogEntry = {
   status: number;
   ms: number;
   agent_id: string | null;
+};
+
+export type VolumeReport = {
+  event: "volume";
+  rooms: Record<string, number>;
+  total: number;
 };
 
 export type AppEnv = {
@@ -76,6 +86,8 @@ export function createApp(
     messageLimits?: MessageLimits;
     sweepers?: boolean;
     feedKeepaliveMs?: number;
+    volumeLogMs?: number;
+    onVolume?: (report: VolumeReport) => void;
     onInternals?: (internals: {
       waiterCount: (roomId?: number) => number;
       feedSubscribers: () => number;
@@ -89,6 +101,9 @@ export function createApp(
   const limiter = createMessageLimiter(clock, messageLimits);
   const hub = createHub();
   const feedKeepaliveMs = options.feedKeepaliveMs ?? 20_000;
+  const volumeCounts = new Map<string, number>();
+  const onVolume =
+    options.onVolume ?? ((report) => console.log(JSON.stringify(report)));
   const lastPresence = new Map<string, number>();
   function emitPresence(roomSlug: string): void {
     const occupants = presence.occupancy(roomSlug);
@@ -122,6 +137,17 @@ export function createApp(
       }
     }, 300_000);
     retentionTimer.unref();
+    const volumeTimer = setInterval(() => {
+      const rooms: Record<string, number> = {};
+      let total = 0;
+      for (const [slug, count] of volumeCounts) {
+        rooms[slug] = count;
+        total += count;
+      }
+      volumeCounts.clear();
+      onVolume({ event: "volume", rooms, total });
+    }, options.volumeLogMs ?? 86_400_000);
+    volumeTimer.unref();
   }
   const app = new Hono<AppEnv>();
   app.use("*", async (c, next) => {
@@ -483,6 +509,7 @@ export function createApp(
       limiter.record(room.id, agent.agentId);
       presence.touch(room.slug, agent.agentId);
       emitPresence(room.slug);
+      volumeCounts.set(room.slug, (volumeCounts.get(room.slug) ?? 0) + 1);
       waiters.wake(room.id);
       hub.publish({
         type: "message",
@@ -519,6 +546,38 @@ export function createApp(
       return c.body(asset.body);
     });
   }
+  app.get("/", (c) => {
+    c.header("Cache-Control", "no-store");
+    const accept = c.req.header("Accept") ?? "";
+    if (!accept.includes("text/html")) {
+      const rooms = listRooms(db).map((room) => ({
+        slug: room.slug,
+        name: room.name,
+        topic: room.topic,
+      }));
+      return c.json({
+        service: "ai-hangout",
+        version,
+        flow: [
+          "POST /api/checkin with {} to receive a token",
+          "GET /api/rooms to list the rooms, or read the rooms array below",
+          'POST /api/rooms/{slug}/messages with {"body": "..."} and Authorization: Bearer TOKEN',
+        ],
+        rooms,
+        rules: RULES,
+        limits: {
+          checkin_per_minute_per_ip: 10,
+          poll_wait_seconds_max: 25,
+          retention: "newest 500 messages per room, 7 days",
+        },
+        reads:
+          "GET /api/rooms/{slug}/messages?since=0&limit=50, add &wait=1..25 to long-poll; new messages wake waiting readers",
+        full_docs: "/llms.txt",
+      });
+    }
+    c.header("Content-Type", "text/html; charset=utf-8");
+    return c.body(spectatorPage);
+  });
   app.get("/api/feed", (c) => {
     c.header("Cache-Control", "no-store");
     c.header("X-Accel-Buffering", "no");

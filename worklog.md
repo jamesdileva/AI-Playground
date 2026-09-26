@@ -1,4 +1,4 @@
-﻿# Worklog - Sprints 0-4 (2026-09-17 to 2026-09-25)
+﻿# Worklog - Sprints 0-5 (2026-09-17 to 2026-09-26)
 
 ## What was done
 
@@ -191,3 +191,45 @@
 
 - Hosted CI green on both runners (run 36225271320); G4 fully closed.
 - S5 next: onboarding, hardening, v1.0.0 per plan (04-sprint-plan.md).
+
+# Sprint 5 (2026-09-26) â€” Agent onboarding and hardening (v1.0.0)
+
+## What was done
+
+- Content-negotiated `GET /` (5.2): `text/html` serves the spectator page,
+  anything else serves onboarding JSON (service/version/flow/rooms/rules/
+  limits/reads/full_docs); covered in `tests/static.test.ts`.
+- Daily per-room volume log line (5.7): in-memory counters bumped on POST,
+  flushed on an interval (24 h default, `volumeLogMs` injectable) through a
+  separate `onVolume` callback so the request `LogEntry` shape is untouched.
+- Wrote `public/llms.txt` (5.3: flow, limits, cursor caveat, empty polls,
+  untrusted-input warning), served as `text/plain`; MIT LICENSE;
+  CHANGELOG from 1.0.0; version bumped to 1.0.0 (no git tag per operator).
+- Reconciled 03-api-spec with shipped behavior (5.9): real onboarding JSON
+  shape, checkin rooms without occupants, completed Â§3.11 table (bad_limit,
+  bad_wait, invalid_json, body_too_large, not_found, defensive 500 note),
+  removed the unimplemented violation-extension claim.
+- Added `tests/errors.test.ts` (5.4, 7 tests): every Â§3.11 code triggered
+  with hint assertions and `retry_after` on all 429/503, including the
+  dead-DB 503 path.
+- Scripted gates: cold start 10/10 trials (5.1); 50-agent load + isolation
+  (5.5/5.6: p95 read 1.8 ms, p95 write 2.3 ms, zero 5xx, 2851 checked /
+  0 leaked); 1-hour log-secrecy run with clean grep (5.8); Â§1.6 absence
+  review (5.10).
+- Verified G5 locally: pipeline green, 58 vitest + 5 e2e + Lighthouse.
+  Record: `gates/G5-2026-09-26.md`.
+
+## Decisions and why
+
+- Volume via `onVolume` instead of widening `LogEntry` (http.test.ts reads
+  `.status`/`.route`; a union would break it).
+- `internal_error` row kept but marked defensive-only rather than deleted
+  (honest docs over an untestable claim).
+- Whitespace-only bodies stay accepted (shipped S2 behavior, not a defect).
+- `app.request` POST limitation worked around with real-HTTP harnesses.
+- No v1.0.0 git tag: tagging waits for the deployment decision.
+
+## Follow-ups
+
+- Hosted CI: <run id after push>; G5 fully closed, v1.0.0 localhost-ready.
+- Next: creative-spaces sprints (06) per plan; deployment (08) last.

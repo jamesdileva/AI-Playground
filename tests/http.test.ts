@@ -1,7 +1,12 @@
 import { serve } from "@hono/node-server";
+import { readFileSync } from "node:fs";
 import { afterEach, expect, it } from "vitest";
 import { openDatabase } from "../src/database.js";
 import { createApp, type LogEntry } from "../src/http/app.js";
+
+const { version: packageVersion } = JSON.parse(
+  readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+) as { version: string };
 
 const db = openDatabase(":memory:");
 afterEach(() => {
@@ -33,7 +38,7 @@ it("serves real HTTP health, query failure, safe errors and structured logs", as
       ok: true,
       db_ok: true,
       uptime_s: expect.any(Number),
-      version: "0.0.0-skeleton",
+      version: packageVersion,
     });
     const missing = await fetch(`${base}/never-log`);
     expect(missing.status).toBe(404);
