@@ -1,4 +1,4 @@
-﻿# Worklog - Sprints 0-3 (2026-09-17 to 2026-09-23)
+﻿# Worklog - Sprints 0-4 (2026-09-17 to 2026-09-25)
 
 ## What was done
 
@@ -142,3 +142,52 @@
 
 - Hosted CI green on both runners (run 35942925517); G3 fully closed.
 - S4 next: per plan (04-sprint-plan.md).
+
+# Sprint 4 (2026-09-25) — Spectator UI
+
+## What was done
+
+- Added `src/feed/hub.ts` (typed pub/sub: message/checkin/presence,
+  throwing subscribers isolated) and `GET /api/feed` SSE in
+  `src/http/app.ts` via `hono/streaming` (serialized writes, `:keepalive`
+  every 20 s injectable, unsubscribe on disconnect). Check-in, POST, touch,
+  leave, and the presence sweeper publish; presence events fire only on
+  occupancy change (sweep-aware diff over slug union).
+- `postMessage` now also returns the stored (sanitized) body for feed
+  events; presence gained an additive `snapshot()`; `DB_PATH` env override
+  added so e2e/perf/manual runs never touch `hangout.db`.
+- Built `public/` (dependency-free): `index.html` (counter, connection
+  status, five room sections), `app.js` (EventSource with backoff,
+  10 s polling fallback after 3 failures, REST re-bootstrap on `since`,
+  `textContent`-only rendering, 60-message cap, scroll-pause, quiet-for-Nm
+  tick), `style.css` (5/2/1 responsive grid, `prefers-color-scheme`,
+  per-room accents). Served from memory at startup with exact content
+  types and `no-store`.
+- Test infra: `@playwright/test` + `globals` + `lighthouse` devDeps,
+  `playwright.config.ts` (own chromium webServer on :3210 with fresh e2e
+  DB, `*.e2e.ts` match so vitest ignores them), `test:e2e` and `perf`
+  scripts, CI extended with build + browser install + e2e + perf.
+- Tests: `tests/feed.test.ts` (7: hub unit + SSE message/checkin/
+  presence-change-only/keepalive/unsubscribe-on-abort),
+  `tests/static.test.ts` (serving + 4.5 no-sink assertion),
+  `tests/e2e/spectator.e2e.ts` (4.2 + four 4.4 XSS cases, fail on dialog).
+- Verified G4: pipeline green (49 vitest, 5 e2e, Lighthouse 1.0),
+  manual browser block (4.1/4.3/4.2-live/4.6 kill/4.7 pause with verified
+  overflow/4.8 viewports/4.10 placeholders), 2-hour memory soak (4.11).
+  Record: `gates/G4-2026-09-25.md`.
+
+## Decisions and why
+
+- Dedicated hub instead of reusing the S3 waiters registry (request-scoped
+  long-poll is the wrong shape for fan-out).
+- Plain filenames + `no-store` over 02-architecture's hashed long-cache
+  (freshness wins on localhost; recorded as a deviation).
+- REST re-bootstrap instead of `Last-Event-ID` replay (simple, correct).
+- `npm ci` in the worktree was blocked by a locked better-sqlite3 binary
+  while the 4.11 soak held it; verified on a byte-identical copy, then
+  restored the worktree with `npm ci` after the soak.
+
+## Follow-ups
+
+- Hosted CI: <run id after push>; G4 fully closed.
+- S5 next: onboarding, hardening, v1.0.0 per plan (04-sprint-plan.md).

@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
+import { streamSSE } from "hono/streaming";
 import type Database from "better-sqlite3";
 import { readFileSync } from "node:fs";
 import { HttpError, databaseOperation } from "./errors.js";
@@ -18,6 +19,7 @@ import {
 } from "../room/queries.js";
 import { createWaiters } from "../waiters/registry.js";
 import { createPresence } from "../presence/tracker.js";
+import { createHub } from "../feed/hub.js";
 import {
   createMessageLimiter,
   DEFAULT_MESSAGE_LIMITS,
@@ -27,6 +29,22 @@ import {
 const { version } = JSON.parse(
   readFileSync(new URL("../../package.json", import.meta.url), "utf8"),
 ) as { version: string };
+
+const STATIC_ASSETS = [
+  ["/", "index.html", "text/html; charset=utf-8"],
+  ["/app.js", "app.js", "text/javascript; charset=utf-8"],
+  ["/style.css", "style.css", "text/css; charset=utf-8"],
+] as const;
+const staticBodies = new Map<string, { body: string; type: string }>();
+for (const [route, file, type] of STATIC_ASSETS) {
+  staticBodies.set(route, {
+    body: readFileSync(
+      new URL(`../../public/${file}`, import.meta.url),
+      "utf8",
+    ),
+    type,
+  });
+}
 
 export type LogEntry = {
   event: string;
@@ -57,8 +75,10 @@ export function createApp(
     now?: () => number;
     messageLimits?: MessageLimits;
     sweepers?: boolean;
+    feedKeepaliveMs?: number;
     onInternals?: (internals: {
       waiterCount: (roomId?: number) => number;
+      feedSubscribers: () => number;
     }) => void;
   } = {},
 ) {
@@ -67,11 +87,32 @@ export function createApp(
   const waiters = createWaiters();
   const presence = createPresence(clock);
   const limiter = createMessageLimiter(clock, messageLimits);
+  const hub = createHub();
+  const feedKeepaliveMs = options.feedKeepaliveMs ?? 20_000;
+  const lastPresence = new Map<string, number>();
+  function emitPresence(roomSlug: string): void {
+    const occupants = presence.occupancy(roomSlug);
+    if (lastPresence.get(roomSlug) !== occupants) {
+      lastPresence.set(roomSlug, occupants);
+      hub.publish({ type: "presence", room: roomSlug, occupants });
+    }
+  }
+  function emitPresenceDiff(): void {
+    const slugs = new Set([
+      ...presence.snapshot().keys(),
+      ...lastPresence.keys(),
+    ]);
+    for (const roomSlug of slugs) emitPresence(roomSlug);
+  }
   options.onInternals?.({
     waiterCount: (roomId?: number) => waiters.count(roomId),
+    feedSubscribers: () => hub.count(),
   });
   if (options.sweepers !== false) {
-    const presenceTimer = setInterval(() => presence.sweep(), 15_000);
+    const presenceTimer = setInterval(() => {
+      presence.sweep();
+      emitPresenceDiff();
+    }, 15_000);
     presenceTimer.unref();
     const retentionTimer = setInterval(() => {
       try {
@@ -243,6 +284,10 @@ export function createApp(
             }),
       );
       c.set("agent", { agentId: result.agentId, handle: result.handle });
+      hub.publish({
+        type: "checkin",
+        total_checkins: result.totalCheckins,
+      });
       return c.json(
         {
           agent_id: result.agentId,
@@ -348,6 +393,7 @@ export function createApp(
           .run(Date.now(), agent.agentId),
       );
       presence.touch(room.slug, agent.agentId);
+      emitPresence(room.slug);
       c.set("agent", agent);
     }
     let result = readMessages(db, room.id, since, limit);
@@ -436,7 +482,18 @@ export function createApp(
       );
       limiter.record(room.id, agent.agentId);
       presence.touch(room.slug, agent.agentId);
+      emitPresence(room.slug);
       waiters.wake(room.id);
+      hub.publish({
+        type: "message",
+        message: {
+          room: room.slug,
+          id: posted.id,
+          handle: agent.handle,
+          body: posted.body,
+          created_at: posted.created_at,
+        },
+      });
       return c.json(
         {
           id: posted.id,
@@ -452,7 +509,78 @@ export function createApp(
   app.post("/api/rooms/:slug/leave", requireAuth(db), (c) => {
     const room = resolveRoom(db, c.req.param("slug"));
     presence.leave(room.slug, c.get("agent").agentId);
+    emitPresence(room.slug);
     return c.body(null, 204);
+  });
+  for (const [route, asset] of staticBodies) {
+    app.get(route, (c) => {
+      c.header("Cache-Control", "no-store");
+      c.header("Content-Type", asset.type);
+      return c.body(asset.body);
+    });
+  }
+  app.get("/api/feed", (c) => {
+    c.header("Cache-Control", "no-store");
+    c.header("X-Accel-Buffering", "no");
+    return streamSSE(c, async (stream) => {
+      let closed = false;
+      let chain: Promise<void> = Promise.resolve();
+      const unsubscribe = hub.subscribe((event) => {
+        chain = chain.then(async () => {
+          if (closed) return;
+          try {
+            if (event.type === "message") {
+              await stream.writeSSE({
+                event: "message",
+                data: JSON.stringify(event.message),
+              });
+            } else if (event.type === "checkin") {
+              await stream.writeSSE({
+                event: "checkin",
+                data: JSON.stringify({
+                  total_checkins: event.total_checkins,
+                }),
+              });
+            } else {
+              await stream.writeSSE({
+                event: "presence",
+                data: JSON.stringify({
+                  room: event.room,
+                  occupants: event.occupants,
+                }),
+              });
+            }
+          } catch {
+            closed = true;
+          }
+        });
+      });
+      try {
+        for (;;) {
+          await stream.sleep(feedKeepaliveMs);
+          let stop = false;
+          chain = chain.then(async () => {
+            if (closed || stream.closed || stream.aborted) {
+              stop = true;
+              return;
+            }
+            try {
+              await stream.write(": keepalive\n\n");
+            } catch {
+              closed = true;
+              stop = true;
+            }
+          });
+          await chain;
+          if (stop) break;
+        }
+      } catch {
+        closed = true;
+      } finally {
+        closed = true;
+        unsubscribe();
+      }
+    });
   });
   return app;
 }

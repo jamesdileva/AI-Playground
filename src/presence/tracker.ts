@@ -48,5 +48,13 @@ export function createPresence(now: () => number = Date.now) {
     return sum;
   }
 
-  return { touch, leave, sweep, occupancy, total };
+  function snapshot(): Map<string, number> {
+    const result = new Map<string, number>();
+    for (const roomKey of rooms.keys()) {
+      result.set(roomKey, occupancy(roomKey));
+    }
+    return result;
+  }
+
+  return { touch, leave, sweep, occupancy, total, snapshot };
 }

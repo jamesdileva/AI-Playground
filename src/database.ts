@@ -2,9 +2,9 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 
-export const databasePath = fileURLToPath(
-  new URL("../hangout.db", import.meta.url),
-);
+export const databasePath =
+  process.env.DB_PATH ??
+  fileURLToPath(new URL("../hangout.db", import.meta.url));
 const migrationsPath = new URL("../migrations/", import.meta.url);
 const migrations = ["001_init.sql", "002_seed_rooms.sql"];
 

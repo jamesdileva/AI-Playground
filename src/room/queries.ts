@@ -136,7 +136,7 @@ export function postMessage(
   roomId: number,
   agent: { agentId: string; handle: string },
   rawBody: unknown,
-): { id: number; created_at: number } {
+): { id: number; created_at: number; body: string } {
   const body = validateMessageBody(rawBody);
   return databaseOperation(() =>
     db
@@ -163,7 +163,11 @@ export function postMessage(
         db.prepare(
           "UPDATE counters SET value = value + 1 WHERE key = 'total_messages'",
         ).run();
-        return { id: Number(inserted.lastInsertRowid), created_at: now };
+        return {
+          id: Number(inserted.lastInsertRowid),
+          created_at: now,
+          body,
+        };
       })
       .immediate(),
   );
