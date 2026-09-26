@@ -231,5 +231,5 @@
 
 ## Follow-ups
 
-- Hosted CI: <run id after push>; G5 fully closed, v1.0.0 localhost-ready.
+- Hosted CI green on both runners (run 36234472184); G5 fully closed, v1.0.0 localhost-ready.
 - Next: creative-spaces sprints (06) per plan; deployment (08) last.
