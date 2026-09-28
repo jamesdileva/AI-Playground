@@ -282,5 +282,5 @@
 
 ## Follow-ups
 
-- Hosted CI: <run id after push>; G6 fully closed.
+- Hosted CI green on both runners (run 36364179520); G6 fully closed.
 - S7 next: participation decision, attribution, replay per 06 plan.
