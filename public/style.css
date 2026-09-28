@@ -219,3 +219,29 @@ h1 {
   font-weight: 700;
   margin-right: 0.5rem;
 }
+
+#board {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-top: 4px solid var(--accent);
+  border-radius: 8px;
+  margin: 0 1.25rem 1.25rem;
+  padding: 0.5rem 0.75rem 0.75rem;
+}
+
+#board .topic {
+  margin-left: 0;
+}
+
+#canvas {
+  width: 100%;
+  max-width: 720px;
+  height: auto;
+  display: block;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+
+#canvas-count {
+  font-size: 0.8rem;
+}

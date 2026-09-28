@@ -35,20 +35,21 @@ export default tseslint.config(
   },
   {
     files: ["src/**/*.ts"],
-    ignores: ["src/room/queries.ts"],
+    ignores: ["src/room/queries.ts", "src/canvas/queries.ts"],
     rules: {
       "no-restricted-syntax": [
         "error",
         {
-          selector: "Literal[value=/\\b(FROM|INTO|UPDATE)\\s+messages\\b/i]",
+          selector:
+            "Literal[value=/\\b(FROM|INTO|UPDATE)\\s+(messages|canvas_ops)\\b/i]",
           message:
-            "Touch the messages table only through src/room/queries.ts (Rule I isolation).",
+            "Touch the messages table only through src/room/queries.ts and canvas_ops only through src/canvas/queries.ts (Rule I isolation).",
         },
         {
           selector:
-            "TemplateLiteral > TemplateElement[value.raw=/\\b(FROM|INTO|UPDATE)\\s+messages\\b/i]",
+            "TemplateLiteral > TemplateElement[value.raw=/\\b(FROM|INTO|UPDATE)\\s+(messages|canvas_ops)\\b/i]",
           message:
-            "Touch the messages table only through src/room/queries.ts (Rule I isolation).",
+            "Touch the messages table only through src/room/queries.ts and canvas_ops only through src/canvas/queries.ts (Rule I isolation).",
         },
       ],
     },

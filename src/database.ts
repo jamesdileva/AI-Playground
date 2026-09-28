@@ -6,7 +6,7 @@ export const databasePath =
   process.env.DB_PATH ??
   fileURLToPath(new URL("../hangout.db", import.meta.url));
 const migrationsPath = new URL("../migrations/", import.meta.url);
-const migrations = ["001_init.sql", "002_seed_rooms.sql"];
+const migrations = ["001_init.sql", "002_seed_rooms.sql", "003_canvas.sql"];
 
 export function migrate(db: Database.Database): number {
   return db

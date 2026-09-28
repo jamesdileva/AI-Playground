@@ -120,6 +120,7 @@ async function bootstrap() {
     }
     box.list.scrollTop = box.list.scrollHeight;
   }
+  await syncCanvas();
 }
 
 async function refreshAll() {
@@ -136,6 +137,7 @@ async function refreshAll() {
     }
     const stats = await fetchJson("/api/stats");
     counter.textContent = `${stats.total_checkins}`;
+    await syncCanvas();
   } catch {
     return;
   }
@@ -201,6 +203,9 @@ function connect() {
       return;
     }
   });
+  source.addEventListener("canvas", () => {
+    void syncCanvas();
+  });
   source.onerror = () => {
     if (source) source.close();
     source = null;
@@ -210,6 +215,124 @@ function connect() {
     scheduleReconnect();
   };
 }
+
+const GRID = 1000;
+const CANVAS_BACKGROUND = "#222233";
+const canvasEl = document.getElementById("canvas");
+const canvasCtx = canvasEl.getContext("2d");
+const canvasCount = document.getElementById("canvas-count");
+let canvasLastSeq = 0;
+
+function hexToRgb(hex) {
+  return [
+    parseInt(hex.slice(1, 3), 16),
+    parseInt(hex.slice(3, 5), 16),
+    parseInt(hex.slice(5, 7), 16),
+  ];
+}
+
+function floodFill(seedX, seedY, fill) {
+  const image = canvasCtx.getImageData(0, 0, GRID, GRID);
+  const data = image.data;
+  const at = (x, y) => (y * GRID + x) * 4;
+  const start = at(seedX, seedY);
+  const r = data[start];
+  const g = data[start + 1];
+  const b = data[start + 2];
+  const a = data[start + 3];
+  if (r === fill[0] && g === fill[1] && b === fill[2] && a === 255) return;
+  const seen = new Uint8Array(GRID * GRID);
+  const stack = [[seedX, seedY]];
+  seen[seedY * GRID + seedX] = 1;
+  while (stack.length > 0) {
+    const point = stack.pop();
+    const x = point[0];
+    const y = point[1];
+    const i = at(x, y);
+    if (
+      data[i] !== r ||
+      data[i + 1] !== g ||
+      data[i + 2] !== b ||
+      data[i + 3] !== a
+    ) {
+      continue;
+    }
+    data[i] = fill[0];
+    data[i + 1] = fill[1];
+    data[i + 2] = fill[2];
+    data[i + 3] = 255;
+    if (x > 0 && !seen[y * GRID + x - 1]) {
+      seen[y * GRID + x - 1] = 1;
+      stack.push([x - 1, y]);
+    }
+    if (x < GRID - 1 && !seen[y * GRID + x + 1]) {
+      seen[y * GRID + x + 1] = 1;
+      stack.push([x + 1, y]);
+    }
+    if (y > 0 && !seen[(y - 1) * GRID + x]) {
+      seen[(y - 1) * GRID + x] = 1;
+      stack.push([x, y - 1]);
+    }
+    if (y < GRID - 1 && !seen[(y + 1) * GRID + x]) {
+      seen[(y + 1) * GRID + x] = 1;
+      stack.push([x, y + 1]);
+    }
+  }
+  canvasCtx.putImageData(image, 0, 0);
+}
+
+function applyCanvasOp(op) {
+  if (op.op === "stroke") {
+    canvasCtx.strokeStyle = op.color;
+    canvasCtx.lineWidth = op.width;
+    canvasCtx.lineCap = "round";
+    canvasCtx.lineJoin = "round";
+    canvasCtx.beginPath();
+    const first = op.pts[0];
+    canvasCtx.moveTo(first[0] + 0.5, first[1] + 0.5);
+    for (let i = 1; i < op.pts.length; i++) {
+      canvasCtx.lineTo(op.pts[i][0] + 0.5, op.pts[i][1] + 0.5);
+    }
+    canvasCtx.stroke();
+  } else if (op.op === "rect") {
+    if (op.fill) {
+      canvasCtx.fillStyle = op.color;
+      canvasCtx.fillRect(op.x, op.y, op.w, op.h);
+    } else {
+      canvasCtx.strokeStyle = op.color;
+      canvasCtx.lineWidth = 2;
+      canvasCtx.strokeRect(op.x, op.y, op.w, op.h);
+    }
+  } else if (op.op === "fill") {
+    floodFill(op.x, op.y, hexToRgb(op.color));
+  } else if (op.op === "text") {
+    canvasCtx.fillStyle = op.color;
+    canvasCtx.font = `${op.size}px sans-serif`;
+    canvasCtx.textBaseline = "alphabetic";
+    canvasCtx.fillText(op.text, op.x, op.y);
+  }
+}
+
+function renderCanvasCount(seq) {
+  canvasCount.textContent = seq > 0 ? `seq ${seq}` : "";
+}
+
+async function syncCanvas() {
+  for (;;) {
+    const history = await fetchJson(
+      `/api/canvas?since=${canvasLastSeq}&limit=500`,
+    );
+    for (const stored of history.ops) {
+      applyCanvasOp(stored.op);
+      canvasLastSeq = stored.seq;
+    }
+    renderCanvasCount(canvasLastSeq);
+    if (!history.has_more) return;
+  }
+}
+
+canvasCtx.fillStyle = CANVAS_BACKGROUND;
+canvasCtx.fillRect(0, 0, GRID, GRID);
 
 setInterval(() => {
   const now = Date.now();

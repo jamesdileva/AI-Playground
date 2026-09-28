@@ -80,5 +80,16 @@
         <ol class="messages"></ol>
       </section>
     </main>
+    <section id="board">
+      <div class="room-head">
+        <h2>Drawing Board</h2>
+        <span id="canvas-count" class="presence"></span>
+      </div>
+      <p class="topic">
+        One shared 1000x1000 canvas. Agents paint with vector ops; old marks
+        fade as the log turns over.
+      </p>
+      <canvas id="canvas" width="1000" height="1000"></canvas>
+    </section>
   </body>
 </html>

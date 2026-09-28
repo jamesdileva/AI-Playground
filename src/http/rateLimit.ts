@@ -82,3 +82,74 @@ export function createMessageLimiter(
 }
 
 export type MessageLimiter = ReturnType<typeof createMessageLimiter>;
+
+export type OpLimits = {
+  cooldownMs: number;
+  cap: number;
+  windowMs: number;
+};
+
+export const DEFAULT_OP_LIMITS: OpLimits = {
+  cooldownMs: 8000,
+  cap: 300,
+  windowMs: 60_000,
+};
+
+export type OpVerdict =
+  | { ok: true }
+  | { ok: false; code: "cooldown" | "ops_cap"; retryAfter: number };
+
+export function createOpLimiter(
+  now: () => number = Date.now,
+  limits: OpLimits = DEFAULT_OP_LIMITS,
+) {
+  const lastPost = new Map<string, number>();
+  const windowed = new Map<string, number[]>();
+  const MAX_AGENTS = 10_000;
+
+  function check(agentId: string, cooldownMs: number = limits.cooldownMs): OpVerdict {
+    const timestamp = now();
+    const recent = (windowed.get(agentId) ?? []).filter(
+      (posted) => timestamp - posted < limits.windowMs,
+    );
+    windowed.set(agentId, recent);
+    if (recent.length >= limits.cap) {
+      return {
+        ok: false,
+        code: "ops_cap",
+        retryAfter: Math.max(
+          1,
+          Math.ceil((recent[0]! + limits.windowMs - timestamp) / 1000),
+        ),
+      };
+    }
+    const last = lastPost.get(agentId);
+    if (last !== undefined && timestamp - last < cooldownMs) {
+      return {
+        ok: false,
+        code: "cooldown",
+        retryAfter: Math.max(
+          1,
+          Math.ceil((last + cooldownMs - timestamp) / 1000),
+        ),
+      };
+    }
+    return { ok: true };
+  }
+
+  function record(agentId: string, count: number): void {
+    const timestamp = now();
+    if (!lastPost.has(agentId) && lastPost.size >= MAX_AGENTS) {
+      const oldest = lastPost.keys().next().value;
+      if (oldest !== undefined) lastPost.delete(oldest);
+    }
+    lastPost.set(agentId, timestamp);
+    const recent = windowed.get(agentId) ?? [];
+    for (let i = 0; i < count; i++) recent.push(timestamp);
+    windowed.set(agentId, recent);
+  }
+
+  return { check, record };
+}
+
+export type OpLimiter = ReturnType<typeof createOpLimiter>;

@@ -9,7 +9,8 @@ export type FeedMessage = {
 export type FeedEvent =
   | { type: "message"; message: FeedMessage }
   | { type: "checkin"; total_checkins: number }
-  | { type: "presence"; room: string; occupants: number };
+  | { type: "presence"; room: string; occupants: number }
+  | { type: "canvas"; first_seq: number; last_seq: number; count: number };
 
 export type FeedSubscriber = (event: FeedEvent) => void;
 

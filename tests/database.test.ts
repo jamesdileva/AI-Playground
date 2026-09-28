@@ -36,6 +36,13 @@ describe("database migrations", () => {
     ]);
     expect(db.pragma("foreign_keys", { simple: true })).toBe(1);
     expect(db.pragma("foreign_key_check")).toEqual([]);
+    expect(
+      db
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'canvas_ops'",
+        )
+        .all(),
+    ).toEqual([{ name: "canvas_ops" }]);
   });
   it("runs twice without any changes and preserves data across reopen", () => {
     const directory = mkdtempSync(join(tmpdir(), "hangout-"));
@@ -48,7 +55,9 @@ describe("database migrations", () => {
     ).run();
     const before = db.prepare("SELECT total_changes() AS count").get();
     expect(migrate(db)).toBe(0);
-    expect(db.prepare("SELECT total_changes() AS count").get()).toEqual(before);
+    expect(db.prepare("SELECT total_changes() AS count").get()).toEqual(
+      before,
+    );
     db.close();
     const reopened = open(path);
     expect(
@@ -59,7 +68,7 @@ describe("database migrations", () => {
         .prepare("SELECT value FROM counters WHERE key = 'total_checkins'")
         .get(),
     ).toEqual({ value: 7 });
-    expect(reopened.pragma("user_version", { simple: true })).toBe(2);
+    expect(reopened.pragma("user_version", { simple: true })).toBe(3);
   });
   it("rolls back schema and version if a later migration fails", () => {
     const db = new Database(":memory:");
@@ -71,21 +80,25 @@ describe("database migrations", () => {
       db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all(),
     ).toEqual([]);
     db.exec("DROP TABLE temp.rooms");
-    expect(migrate(db)).toBe(2);
+    expect(migrate(db)).toBe(3);
   });
   it("does not change journal mode or data when opening a newer database", () => {
     const directory = mkdtempSync(join(tmpdir(), "hangout-"));
     directories.push(directory);
     const path = join(directory, "newer.db");
     const original = new Database(path);
-    original.exec("CREATE TABLE future_data (value TEXT); INSERT INTO future_data VALUES ('preserved')");
+    original.exec(
+      "CREATE TABLE future_data (value TEXT); INSERT INTO future_data VALUES ('preserved')",
+    );
     original.pragma("user_version = 99");
     original.close();
     expect(() => openDatabase(path)).toThrow("newer");
     const reopened = new Database(path);
     connections.push(reopened);
     expect(reopened.pragma("journal_mode", { simple: true })).toBe("delete");
-    expect(reopened.prepare("SELECT value FROM future_data").get()).toEqual({ value: "preserved" });
+    expect(reopened.prepare("SELECT value FROM future_data").get()).toEqual({
+      value: "preserved",
+    });
   });
   it("rejects a database newer than the application without changing it", () => {
     const db = open();

@@ -22,9 +22,23 @@ import { createPresence } from "../presence/tracker.js";
 import { createHub } from "../feed/hub.js";
 import {
   createMessageLimiter,
+  createOpLimiter,
   DEFAULT_MESSAGE_LIMITS,
+  DEFAULT_OP_LIMITS,
   type MessageLimits,
+  type OpLimits,
 } from "./rateLimit.js";
+import {
+  CANVAS_RETENTION_OPS,
+  CANVAS_SIZE,
+  canvasStats,
+  postCanvasOps,
+  readCanvasOps,
+  sweepCanvasOps,
+  validateCanvasOps,
+  type CanvasOp,
+} from "../canvas/queries.js";
+import { foldOps, SNAPSHOT_MIME } from "../canvas/fold.js";
 
 const { version } = JSON.parse(
   readFileSync(new URL("../../package.json", import.meta.url), "utf8"),
@@ -76,6 +90,18 @@ const RULES = {
   no_consecutive_posts: true,
 };
 
+const CANVAS_RULES = {
+  grid: `${CANVAS_SIZE}x${CANVAS_SIZE}`,
+  max_ops_per_request: 50,
+  cooldown_seconds: 8,
+  ops_per_minute: 300,
+  retention_ops: CANVAS_RETENTION_OPS,
+};
+
+// Global op-rate spike threshold (ops/minute across all agents) past which
+// the canvas cooldown doubles. Config, not contract.
+const CANVAS_RATE_SPIKE_OPS_PER_MINUTE = 1200;
+
 export function createApp(
   db: Database.Database,
   log: (entry: LogEntry) => void = (entry) =>
@@ -84,6 +110,7 @@ export function createApp(
     checkinLimit?: number;
     now?: () => number;
     messageLimits?: MessageLimits;
+    opLimits?: OpLimits;
     sweepers?: boolean;
     feedKeepaliveMs?: number;
     volumeLogMs?: number;
@@ -91,14 +118,20 @@ export function createApp(
     onInternals?: (internals: {
       waiterCount: (roomId?: number) => number;
       feedSubscribers: () => number;
+      foldCount: () => number;
     }) => void;
   } = {},
 ) {
   const clock = options.now ?? Date.now;
   const messageLimits = options.messageLimits ?? DEFAULT_MESSAGE_LIMITS;
+  const opLimits = options.opLimits ?? DEFAULT_OP_LIMITS;
   const waiters = createWaiters();
   const presence = createPresence(clock);
   const limiter = createMessageLimiter(clock, messageLimits);
+  const opLimiter = createOpLimiter(clock, opLimits);
+  const opTimestamps: number[] = [];
+  let snapshotCache: { key: string; png: Buffer } | null = null;
+  let foldCount = 0;
   const hub = createHub();
   const feedKeepaliveMs = options.feedKeepaliveMs ?? 20_000;
   const volumeCounts = new Map<string, number>();
@@ -122,6 +155,7 @@ export function createApp(
   options.onInternals?.({
     waiterCount: (roomId?: number) => waiters.count(roomId),
     feedSubscribers: () => hub.count(),
+    foldCount: () => foldCount,
   });
   if (options.sweepers !== false) {
     const presenceTimer = setInterval(() => {
@@ -539,6 +573,153 @@ export function createApp(
     emitPresence(room.slug);
     return c.body(null, 204);
   });
+  app.post(
+    "/api/canvas",
+    requireAuth(db),
+    bodyLimit({
+      maxSize: 65536,
+      onError: () => {
+        throw new HttpError(
+          413,
+          "body_too_large",
+          "Request body exceeds 65536 bytes.",
+          "Send at most 50 ops per request.",
+        );
+      },
+    }),
+    async (c) => {
+      c.header("Cache-Control", "no-store");
+      const text = await c.req.text();
+      let input: unknown;
+      try {
+        input = text.length ? JSON.parse(text) : {};
+      } catch {
+        throw new HttpError(
+          400,
+          "invalid_json",
+          "Malformed JSON body.",
+          "Send a valid JSON object with an ops array.",
+        );
+      }
+      const agent = c.get("agent");
+      const nowTs = clock();
+      while (
+        opTimestamps.length > 0 &&
+        nowTs - opTimestamps[0]! > 60_000
+      ) {
+        opTimestamps.shift();
+      }
+      const cooldownMs =
+        opTimestamps.length > CANVAS_RATE_SPIKE_OPS_PER_MINUTE
+          ? opLimits.cooldownMs * 2
+          : opLimits.cooldownMs;
+      const allowed = opLimiter.check(agent.agentId, cooldownMs);
+      if (!allowed.ok) {
+        throw new HttpError(
+          429,
+          allowed.code,
+          allowed.code === "cooldown"
+            ? "You painted on the canvas too recently."
+            : "You have submitted too many ops this minute.",
+          allowed.code === "cooldown"
+            ? "Wait retry_after seconds before painting again."
+            : "Wait until some of your ops are older than a minute, then try again.",
+          allowed.retryAfter,
+        );
+      }
+      const ops = validateCanvasOps(input);
+      const posted = postCanvasOps(db, agent, ops);
+      opLimiter.record(agent.agentId, ops.length);
+      for (let i = 0; i < ops.length; i++) opTimestamps.push(nowTs);
+      volumeCounts.set("canvas", (volumeCounts.get("canvas") ?? 0) + ops.length);
+      if (canvasStats(db).count > CANVAS_RETENTION_OPS) sweepCanvasOps(db);
+      hub.publish({
+        type: "canvas",
+        first_seq: posted.firstSeq,
+        last_seq: posted.lastSeq,
+        count: posted.count,
+      });
+      return c.json(
+        {
+          first_seq: posted.firstSeq,
+          last_seq: posted.lastSeq,
+          count: posted.count,
+          next_cursor: posted.lastSeq,
+          created_at: posted.created_at,
+        },
+        201,
+      );
+    },
+  );
+  app.get("/api/canvas", (c) => {
+    c.header("Cache-Control", "no-store");
+    const sinceRaw = c.req.query("since") ?? "0";
+    const limitRaw = c.req.query("limit") ?? "100";
+    if (!/^\d+$/.test(sinceRaw) || !Number.isSafeInteger(Number(sinceRaw))) {
+      throw new HttpError(
+        400,
+        "bad_cursor",
+        "Query parameter since must be a non-negative integer.",
+        "Send the next_cursor value from your last read, starting at 0.",
+      );
+    }
+    if (!/^\d+$/.test(limitRaw) || !Number.isSafeInteger(Number(limitRaw))) {
+      throw new HttpError(
+        400,
+        "bad_limit",
+        "Query parameter limit must be an integer between 1 and 500.",
+        "Send a limit from 1 to 500, or omit it for the default of 100.",
+      );
+    }
+    const since = Number(sinceRaw);
+    let limit = Number(limitRaw);
+    if (limit < 1) {
+      throw new HttpError(
+        400,
+        "bad_limit",
+        "Query parameter limit must be an integer between 1 and 500.",
+        "Send a limit from 1 to 500, or omit it for the default of 100.",
+      );
+    }
+    if (limit > 500) limit = 500;
+    const result = readCanvasOps(db, since, limit);
+    return c.json({
+      ops: result.ops,
+      next_cursor: result.nextCursor,
+      has_more: result.hasMore,
+    });
+  });
+  app.get("/api/canvas/meta", (c) => {
+    c.header("Cache-Control", "no-store");
+    const stats = canvasStats(db);
+    return c.json({
+      width: CANVAS_SIZE,
+      height: CANVAS_SIZE,
+      op_count: stats.count,
+      oldest_seq: stats.oldestSeq,
+      newest_seq: stats.newestSeq,
+      retention_ops: CANVAS_RETENTION_OPS,
+    });
+  });
+  app.get("/api/canvas/snapshot", (c) => {
+    const stats = canvasStats(db);
+    const key = `${stats.oldestSeq}:${stats.newestSeq}`;
+    if (!snapshotCache || snapshotCache.key !== key) {
+      const ops: CanvasOp[] = [];
+      let since = 0;
+      for (;;) {
+        const page = readCanvasOps(db, since, 500);
+        for (const stored of page.ops) ops.push(stored.op);
+        if (!page.hasMore) break;
+        since = page.nextCursor;
+      }
+      snapshotCache = { key, png: foldOps(ops) };
+      foldCount++;
+    }
+    c.header("Content-Type", SNAPSHOT_MIME);
+    c.header("Cache-Control", "public, max-age=5");
+    return c.body(new Uint8Array(snapshotCache.png));
+  });
   for (const [route, asset] of staticBodies) {
     app.get(route, (c) => {
       c.header("Cache-Control", "no-store");
@@ -565,6 +746,13 @@ export function createApp(
         ],
         rooms,
         rules: RULES,
+        canvas: {
+          post: "POST /api/canvas with {\"ops\": [...]} (stroke, rect, fill, text)",
+          read: "GET /api/canvas?since=0&limit=100",
+          meta: "GET /api/canvas/meta for the grid size and retained range",
+          snapshot: "GET /api/canvas/snapshot for a PNG of the current canvas",
+          rules: CANVAS_RULES,
+        },
         limits: {
           checkin_per_minute_per_ip: 10,
           poll_wait_seconds_max: 25,
@@ -600,12 +788,21 @@ export function createApp(
                   total_checkins: event.total_checkins,
                 }),
               });
-            } else {
+            } else if (event.type === "presence") {
               await stream.writeSSE({
                 event: "presence",
                 data: JSON.stringify({
                   room: event.room,
                   occupants: event.occupants,
+                }),
+              });
+            } else {
+              await stream.writeSSE({
+                event: "canvas",
+                data: JSON.stringify({
+                  first_seq: event.first_seq,
+                  last_seq: event.last_seq,
+                  count: event.count,
                 }),
               });
             }

@@ -1,4 +1,4 @@
-﻿# Worklog - Sprints 0-5 (2026-09-17 to 2026-09-26)
+﻿# Worklog - Sprints 0-6 (2026-09-17 to 2026-09-27)
 
 ## What was done
 
@@ -233,3 +233,54 @@
 
 - Hosted CI green on both runners (run 36234472184); G5 fully closed, v1.0.0 localhost-ready.
 - Next: creative-spaces sprints (06) per plan; deployment (08) last.
+
+# Sprint 6 (2026-09-27) â€” The Drawing Board
+
+## What was done
+
+- Migration `003_canvas.sql`: `canvas_ops` (seq AUTOINCREMENT cursor,
+  agent/handle/op_type/op_json/bounds/created_at, index on seq); op log is
+  the only canvas table.
+- New `src/canvas/queries.ts` (sole canvas_ops toucher): strict validation
+  (1â€“50 ops/req, 1000Ã—1000 integer grid, stroke â‰¤64 pts, text â‰¤100 chars,
+  hex colors, sized widths) with `400 canvas_invalid` hints, transactional
+  batch insert, cursor reads mirroring messages, 20,000-op retention sweep.
+  Rule I ESLint guard extended to `canvas_ops`.
+- New `src/canvas/fold.ts`: `@napi-rs/canvas` rasterizer (stroke/rect/flood
+  fill/text on dark `#222233`), pure `foldOps` shared by route and tests.
+- New `src/http/rateLimit.ts` minute-window `createOpLimiter` (8 s
+  cooldown, 300 ops/min `ops_cap`); global op-rate spike past 1200 ops/min
+  doubles the cooldown (idle-decay analogue); per-POST inline retention
+  sweep past 20,000 ops.
+- Routes: `POST /api/canvas` (201 with first/last seq), `GET /api/canvas`
+  (since/limit 100/500, `bad_cursor`/`bad_limit` reused), `/meta`, `/snapshot`
+  (fold cache keyed on oldest:newest seq, refold counted via `onInternals`,
+  `Cache-Control: public, max-age=5`), `canvas` SSE events, onboarding JSON
+  + `/llms.txt` canvas chapters (bounds read from meta, never hardcoded).
+- Spectator board: `<canvas>` below the room grid, Canvas2D incremental
+  fold from REST bootstrap + SSE deltas (own flood fill, `fillText` text),
+  no new JS dependencies.
+- Tests: `tests/canvas.test.ts` (9: round-trip, 400s, cursors, retention,
+  limits, meta, pixel-equality Ã—3 + cache proof, feed event, validator
+  unit), `tests/e2e/canvas.e2e.ts` (paint + four 6.6 XSS-as-glyph cases),
+  migration-count updates in `tests/database.test.ts`.
+- Verified G6: pipeline green (67 vitest, 10 e2e, Lighthouse 1.0), 30-min
+  20-agent paint soak (3,997 paints/reads, zero failures, room p95 1.4 ms,
+  RSS +1.3%). Record: `gates/G6-2026-09-27.md`.
+
+## Decisions and why
+
+- Dedicated op limiter instead of stretching the hourly message limiter
+  (different window, different code, zero S3 risk).
+- Canvas reads default 100 / max 500 vs rooms 50/200 (replay efficiency).
+- New codes `canvas_invalid` / `ops_cap`; reused codes where semantics
+  already matched.
+- Snapshot cache keyed on oldest:newest so sweeps invalidate correctly;
+  reads never refold (the 6.8 fail condition, proven by fold count).
+- Flood-fill seed-pixel fast path after the 20k-fill worker crash.
+- No turns/plots/links (S7/S8); no room/canvas cross-reads.
+
+## Follow-ups
+
+- Hosted CI: <run id after push>; G6 fully closed.
+- S7 next: participation decision, attribution, replay per 06 plan.
