@@ -51,6 +51,7 @@ export type StoredCanvasOp = {
   agent_id: string;
   handle: string;
   op: CanvasOp;
+  bounds: [number, number, number, number];
   created_at: number;
 };
 
@@ -238,6 +239,30 @@ export function validateCanvasOps(raw: unknown): CanvasOp[] {
   return ops.map((op, index) => validateOp(op, index));
 }
 
+/**
+ * Pixel-change cost of an op for the hourly pixel budget. Geometric ops use
+ * closed-form area; flood fills pass their raster-counted area as fillPx.
+ */
+export function pixelCost(op: CanvasOp, fillPx = 0): number {
+  switch (op.op) {
+    case "stroke": {
+      let length = 0;
+      for (let i = 1; i < op.pts.length; i++) {
+        const dx = op.pts[i]![0] - op.pts[i - 1]![0];
+        const dy = op.pts[i]![1] - op.pts[i - 1]![1];
+        length += Math.hypot(dx, dy);
+      }
+      return Math.max(1, Math.ceil(length * op.width));
+    }
+    case "rect":
+      return op.fill ? op.w * op.h : Math.ceil(2 * (op.w + op.h) * 2);
+    case "fill":
+      return Math.max(1, fillPx);
+    case "text":
+      return Math.max(1, Math.ceil(0.5 * op.size * op.size * op.text.length));
+  }
+}
+
 function boundsOf(op: CanvasOp): [number, number, number, number] {
   switch (op.op) {
     case "stroke": {
@@ -309,13 +334,14 @@ export function readCanvasOps(
     () =>
       db
         .prepare(
-          "SELECT seq, agent_id, handle, op_json, created_at FROM canvas_ops WHERE seq > ? ORDER BY seq LIMIT ?",
+          "SELECT seq, agent_id, handle, op_json, bounds, created_at FROM canvas_ops WHERE seq > ? ORDER BY seq LIMIT ?",
         )
         .all(since, limit + 1) as Array<{
         seq: number;
         agent_id: string;
         handle: string;
         op_json: string;
+        bounds: string;
         created_at: number;
       }>,
   );
@@ -326,6 +352,7 @@ export function readCanvasOps(
     agent_id: row.agent_id,
     handle: row.handle,
     op: JSON.parse(row.op_json) as CanvasOp,
+    bounds: JSON.parse(row.bounds) as [number, number, number, number],
     created_at: row.created_at,
   }));
   return {

@@ -107,7 +107,10 @@ export function createOpLimiter(
   const windowed = new Map<string, number[]>();
   const MAX_AGENTS = 10_000;
 
-  function check(agentId: string, cooldownMs: number = limits.cooldownMs): OpVerdict {
+  function check(
+    agentId: string,
+    cooldownMs: number = limits.cooldownMs,
+  ): OpVerdict {
     const timestamp = now();
     const recent = (windowed.get(agentId) ?? []).filter(
       (posted) => timestamp - posted < limits.windowMs,
@@ -153,3 +156,53 @@ export function createOpLimiter(
 }
 
 export type OpLimiter = ReturnType<typeof createOpLimiter>;
+
+export type PixelBudgetLimits = {
+  budgetPx: number;
+  windowMs: number;
+};
+
+export const DEFAULT_PIXEL_BUDGET: PixelBudgetLimits = {
+  budgetPx: 2_000_000,
+  windowMs: 3_600_000,
+};
+
+export type BudgetVerdict = { ok: true } | { ok: false; retryAfter: number };
+
+export function createPixelBudget(
+  now: () => number = Date.now,
+  limits: PixelBudgetLimits = DEFAULT_PIXEL_BUDGET,
+) {
+  const spending = new Map<string, Array<{ at: number; px: number }>>();
+
+  function check(agentId: string, px: number): BudgetVerdict {
+    const timestamp = now();
+    const recent = (spending.get(agentId) ?? []).filter(
+      (entry) => timestamp - entry.at < limits.windowMs,
+    );
+    spending.set(agentId, recent);
+    const used = recent.reduce((sum, entry) => sum + entry.px, 0);
+    if (used + px > limits.budgetPx) {
+      const oldest = recent[0]?.at ?? timestamp;
+      return {
+        ok: false,
+        retryAfter: Math.max(
+          1,
+          Math.ceil((oldest + limits.windowMs - timestamp) / 1000),
+        ),
+      };
+    }
+    return { ok: true };
+  }
+
+  function record(agentId: string, px: number): void {
+    const timestamp = now();
+    const recent = spending.get(agentId) ?? [];
+    recent.push({ at: timestamp, px });
+    spending.set(agentId, recent);
+  }
+
+  return { check, record };
+}
+
+export type PixelBudget = ReturnType<typeof createPixelBudget>;

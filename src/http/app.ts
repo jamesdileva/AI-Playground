@@ -23,22 +23,35 @@ import { createHub } from "../feed/hub.js";
 import {
   createMessageLimiter,
   createOpLimiter,
+  createPixelBudget,
   DEFAULT_MESSAGE_LIMITS,
   DEFAULT_OP_LIMITS,
+  DEFAULT_PIXEL_BUDGET,
   type MessageLimits,
   type OpLimits,
+  type PixelBudgetLimits,
 } from "./rateLimit.js";
 import {
   CANVAS_RETENTION_OPS,
   CANVAS_SIZE,
   canvasStats,
+  pixelCost,
   postCanvasOps,
   readCanvasOps,
   sweepCanvasOps,
   validateCanvasOps,
   type CanvasOp,
 } from "../canvas/queries.js";
-import { foldOps, SNAPSHOT_MIME } from "../canvas/fold.js";
+import {
+  countFillArea,
+  createBlankCanvas,
+  drawWatermark,
+  foldToCanvas,
+  hexToRgb,
+  renderOps,
+  SNAPSHOT_MIME,
+  type FoldCanvas,
+} from "../canvas/fold.js";
 
 const { version } = JSON.parse(
   readFileSync(new URL("../../package.json", import.meta.url), "utf8"),
@@ -95,8 +108,12 @@ const CANVAS_RULES = {
   max_ops_per_request: 50,
   cooldown_seconds: 8,
   ops_per_minute: 300,
+  pixel_budget_per_hour: DEFAULT_PIXEL_BUDGET.budgetPx,
   retention_ops: CANVAS_RETENTION_OPS,
 };
+
+export const REPLAY_MAX_WINDOW = 2000;
+const REPLAY_FRAME_EVERY = 100;
 
 // Global op-rate spike threshold (ops/minute across all agents) past which
 // the canvas cooldown doubles. Config, not contract.
@@ -111,6 +128,7 @@ export function createApp(
     now?: () => number;
     messageLimits?: MessageLimits;
     opLimits?: OpLimits;
+    pixelBudgetLimits?: PixelBudgetLimits;
     sweepers?: boolean;
     feedKeepaliveMs?: number;
     volumeLogMs?: number;
@@ -129,9 +147,46 @@ export function createApp(
   const presence = createPresence(clock);
   const limiter = createMessageLimiter(clock, messageLimits);
   const opLimiter = createOpLimiter(clock, opLimits);
+  const pixelBudget = createPixelBudget(
+    clock,
+    options.pixelBudgetLimits ?? DEFAULT_PIXEL_BUDGET,
+  );
   const opTimestamps: number[] = [];
-  let snapshotCache: { key: string; png: Buffer } | null = null;
+  type CanvasCache = {
+    oldest: number | null;
+    newest: number | null;
+    canvas: FoldCanvas;
+  };
+  let canvasCache: CanvasCache | null = null;
   let foldCount = 0;
+
+  function readAllRetainedOps(): CanvasOp[] {
+    const ops: CanvasOp[] = [];
+    let since = 0;
+    for (;;) {
+      const page = readCanvasOps(db, since, 500);
+      for (const stored of page.ops) ops.push(stored.op);
+      if (!page.hasMore) return ops;
+      since = page.nextCursor;
+    }
+  }
+
+  function ensureCanvasCache(): { canvas: FoldCanvas; count: number } {
+    const stats = canvasStats(db);
+    if (
+      !canvasCache ||
+      canvasCache.oldest !== stats.oldestSeq ||
+      canvasCache.newest !== stats.newestSeq
+    ) {
+      canvasCache = {
+        oldest: stats.oldestSeq,
+        newest: stats.newestSeq,
+        canvas: foldToCanvas(readAllRetainedOps()),
+      };
+      foldCount++;
+    }
+    return { canvas: canvasCache.canvas, count: stats.count };
+  }
   const hub = createHub();
   const feedKeepaliveMs = options.feedKeepaliveMs ?? 20_000;
   const volumeCounts = new Map<string, number>();
@@ -603,10 +658,7 @@ export function createApp(
       }
       const agent = c.get("agent");
       const nowTs = clock();
-      while (
-        opTimestamps.length > 0 &&
-        nowTs - opTimestamps[0]! > 60_000
-      ) {
+      while (opTimestamps.length > 0 && nowTs - opTimestamps[0]! > 60_000) {
         opTimestamps.shift();
       }
       const cooldownMs =
@@ -628,11 +680,42 @@ export function createApp(
         );
       }
       const ops = validateCanvasOps(input);
+      let totalPx = 0;
+      const needsRaster = ops.some((op) => op.op === "fill");
+      const raster = needsRaster ? ensureCanvasCache().canvas : null;
+      for (const op of ops) {
+        totalPx +=
+          op.op === "fill" && raster
+            ? pixelCost(op, countFillArea(raster, op.x, op.y, hexToRgb(op.color)))
+            : pixelCost(op);
+      }
+      const budgeted = pixelBudget.check(agent.agentId, totalPx);
+      if (!budgeted.ok) {
+        throw new HttpError(
+          429,
+          "pixel_budget",
+          "You have repainted too many pixels this hour.",
+          "Wait retry_after seconds for your pixel budget to refill, or paint smaller marks.",
+          budgeted.retryAfter,
+        );
+      }
       const posted = postCanvasOps(db, agent, ops);
       opLimiter.record(agent.agentId, ops.length);
+      pixelBudget.record(agent.agentId, totalPx);
       for (let i = 0; i < ops.length; i++) opTimestamps.push(nowTs);
-      volumeCounts.set("canvas", (volumeCounts.get("canvas") ?? 0) + ops.length);
-      if (canvasStats(db).count > CANVAS_RETENTION_OPS) sweepCanvasOps(db);
+      volumeCounts.set(
+        "canvas",
+        (volumeCounts.get("canvas") ?? 0) + ops.length,
+      );
+      if (canvasCache) {
+        renderOps(canvasCache.canvas, ops);
+        canvasCache.newest = posted.lastSeq;
+        if (canvasCache.oldest === null) canvasCache.oldest = posted.firstSeq;
+      }
+      if (canvasStats(db).count > CANVAS_RETENTION_OPS) {
+        sweepCanvasOps(db);
+        canvasCache = null;
+      }
       hub.publish({
         type: "canvas",
         first_seq: posted.firstSeq,
@@ -701,24 +784,126 @@ export function createApp(
       retention_ops: CANVAS_RETENTION_OPS,
     });
   });
-  app.get("/api/canvas/snapshot", (c) => {
-    const stats = canvasStats(db);
-    const key = `${stats.oldestSeq}:${stats.newestSeq}`;
-    if (!snapshotCache || snapshotCache.key !== key) {
-      const ops: CanvasOp[] = [];
-      let since = 0;
-      for (;;) {
-        const page = readCanvasOps(db, since, 500);
-        for (const stored of page.ops) ops.push(stored.op);
-        if (!page.hasMore) break;
-        since = page.nextCursor;
-      }
-      snapshotCache = { key, png: foldOps(ops) };
-      foldCount++;
+  app.get("/api/canvas/attribution", (c) => {
+    c.header("Cache-Control", "no-store");
+    const parts = (c.req.query("region") ?? "").split(",").map(Number);
+    if (
+      parts.length !== 4 ||
+      parts.some((n) => !Number.isInteger(n) || n < 0 || n >= CANVAS_SIZE)
+    ) {
+      throw new HttpError(
+        400,
+        "canvas_invalid",
+        "Query parameter region must be x0,y0,x1,y1 integers inside the grid.",
+        `Send region as four integers from 0 to ${CANVAS_SIZE - 1}, e.g. region=100,100,200,200.`,
+      );
     }
+    const [x0, y0, x1, y1] = parts as [number, number, number, number];
+    if (x0 > x1 || y0 > y1) {
+      throw new HttpError(
+        400,
+        "canvas_invalid",
+        "Region corners must satisfy x0 <= x1 and y0 <= y1.",
+        "Send region as x0,y0,x1,y1 with the top-left corner first.",
+      );
+    }
+    const ops: Array<{ seq: number; handle: string }> = [];
+    const handleCounts: Record<string, number> = {};
+    let since = 0;
+    for (;;) {
+      const page = readCanvasOps(db, since, 500);
+      for (const stored of page.ops) {
+        const [bx0, by0, bx1, by1] = stored.bounds;
+        if (bx1 < x0 || bx0 > x1 || by1 < y0 || by0 > y1) continue;
+        ops.push({ seq: stored.seq, handle: stored.handle });
+        handleCounts[stored.handle] = (handleCounts[stored.handle] ?? 0) + 1;
+      }
+      if (!page.hasMore) break;
+      since = page.nextCursor;
+    }
+    return c.json({
+      region: [x0, y0, x1, y1],
+      ops,
+      handle_counts: handleCounts,
+    });
+  });
+  app.get("/api/canvas/replay", (c) => {
+    c.header("Cache-Control", "no-store");
+    const fromRaw = c.req.query("from") ?? "0";
+    const toRaw = c.req.query("to") ?? "";
+    for (const [name, raw] of [
+      ["from", fromRaw],
+      ["to", toRaw],
+    ] as const) {
+      if (!/^\d+$/.test(raw) || !Number.isSafeInteger(Number(raw))) {
+        throw new HttpError(
+          400,
+          "bad_cursor",
+          `Query parameter ${name} must be a non-negative integer.`,
+          "Send from/to as op sequence numbers, starting at 0.",
+        );
+      }
+    }
+    const from = Number(fromRaw);
+    const to = Number(toRaw);
+    if (to <= from) {
+      throw new HttpError(
+        400,
+        "canvas_invalid",
+        "Query parameter to must be greater than from.",
+        "Send a non-empty window like ?from=0&to=500.",
+      );
+    }
+    if (to - from > REPLAY_MAX_WINDOW) {
+      throw new HttpError(
+        400,
+        "bad_limit",
+        `Replay window larger than ${REPLAY_MAX_WINDOW} ops.`,
+        `Send to - from of at most ${REPLAY_MAX_WINDOW}.`,
+      );
+    }
+    const canvas = createBlankCanvas();
+    const frames: Array<{ seq: number; png: string }> = [];
+    const snap = (seq: number) => {
+      frames.push({
+        seq,
+        png: canvas.toBuffer("image/png").toString("base64"),
+      });
+    };
+    let since = from;
+    let lastSeq = from;
+    let stopped = false;
+    for (; !stopped;) {
+      const page = readCanvasOps(db, since, 500);
+      if (page.ops.length === 0) break;
+      for (const stored of page.ops) {
+        if (stored.seq > to) {
+          stopped = true;
+          break;
+        }
+        renderOps(canvas, [stored.op]);
+        lastSeq = stored.seq;
+        if ((stored.seq - from) % REPLAY_FRAME_EVERY === 0) snap(stored.seq);
+      }
+      if (!page.hasMore || lastSeq >= to) break;
+      since = page.nextCursor;
+    }
+    if (
+      lastSeq > from &&
+      (frames.length === 0 || frames[frames.length - 1]!.seq !== lastSeq)
+    ) {
+      snap(lastSeq);
+    }
+    return c.json({ from, to, frames });
+  });
+  app.get("/api/canvas/snapshot", (c) => {
+    const { canvas, count } = ensureCanvasCache();
+    const view = createBlankCanvas();
+    view.getContext("2d").drawImage(canvas, 0, 0);
+    drawWatermark(view, count);
     c.header("Content-Type", SNAPSHOT_MIME);
     c.header("Cache-Control", "public, max-age=5");
-    return c.body(new Uint8Array(snapshotCache.png));
+    return c.body(new Uint8Array(view.toBuffer("image/png")));
   });
   for (const [route, asset] of staticBodies) {
     app.get(route, (c) => {
@@ -747,10 +932,11 @@ export function createApp(
         rooms,
         rules: RULES,
         canvas: {
-          post: "POST /api/canvas with {\"ops\": [...]} (stroke, rect, fill, text)",
+          post: 'POST /api/canvas with {"ops": [...]} (stroke, rect, fill, text)',
           read: "GET /api/canvas?since=0&limit=100",
           meta: "GET /api/canvas/meta for the grid size and retained range",
-          snapshot: "GET /api/canvas/snapshot for a PNG of the current canvas",
+          snapshot:
+            "GET /api/canvas/snapshot for a PNG of the current canvas",
           rules: CANVAS_RULES,
         },
         limits: {

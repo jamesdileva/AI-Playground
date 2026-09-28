@@ -1,4 +1,4 @@
-﻿# Worklog - Sprints 0-6 (2026-09-17 to 2026-09-27)
+﻿# Worklog - Sprints 0-7 (2026-09-17 to 2026-09-28)
 
 ## What was done
 
@@ -256,7 +256,7 @@
   (since/limit 100/500, `bad_cursor`/`bad_limit` reused), `/meta`, `/snapshot`
   (fold cache keyed on oldest:newest seq, refold counted via `onInternals`,
   `Cache-Control: public, max-age=5`), `canvas` SSE events, onboarding JSON
-  + `/llms.txt` canvas chapters (bounds read from meta, never hardcoded).
+  - `/llms.txt` canvas chapters (bounds read from meta, never hardcoded).
 - Spectator board: `<canvas>` below the room grid, Canvas2D incremental
   fold from REST bootstrap + SSE deltas (own flood fill, `fillText` text),
   no new JS dependencies.
@@ -284,3 +284,45 @@
 
 - Hosted CI green on both runners (run 36364179520); G6 fully closed.
 - S7 next: participation decision, attribution, replay per 06 plan.
+
+# Sprint 7 (2026-09-28) â€” Participation, attribution, replay
+
+## What was done
+
+- 7.1 decision TURNS REJECTED (recorded in the gate file): S6 soak showed
+  zero contention, default hypothesis + rule 5 hold, pixel budget ships as
+  the fairness control instead. 7.2/7.3 N/A (conditional).
+- Pixel budget (7.4): `createPixelBudget` in `rateLimit.ts` (2M px/hour/
+  agent, 1h sliding window, oldest-debit `retry_after`); geometric costs in
+  `queries.pixelCost`, exact raster-counted fill areas; `429 pixel_budget`
+  enforced in POST before insert, recorded after.
+- Snapshot cache refactor: holds the live canvas (snapshot = copy +
+  current-count watermark + encode); doubles as the fill-area oracle, so
+  fills cost exactly with no extra fold. No-op repaints cost 1 px.
+- Attribution (7.5): `GET /api/canvas/attribution?region=` with JS
+  bounds-intersect over the log (no migration); `bounds` added to
+  `StoredCanvasOp` (additive, parsed from the S6 column).
+- Replay (7.6/7.7): `GET /api/canvas/replay?from=&to=`, single incremental
+  fold, base64 PNG frames every 100 ops + final, 2000-op cap (`400
+bad_limit` naming the max; `to <= from` is 400).
+- Watermark `free-draw Â· N ops` drawn identically by `foldOps` and the
+  snapshot path (6.4 passes unchanged); `llms.txt` + onboarding
+  `canvas.rules` document budget/attribution/replay/no-turns.
+- Tests: +5 in `tests/canvas.test.ts` (budget trip, fill proportionality,
+  500-sample attribution, replay identity, replay cap). Verified: 72
+  vitest, 10 e2e, Lighthouse 1.0. Record: `gates/G7-2026-09-28.md`.
+
+## Decisions and why
+
+- Reject turns over probe-first/ship (approved options): no jamming
+  evidence, participation bar not met.
+- 2M px/hour default (approved): ~2 full canvases per agent per hour.
+- Scrubber UI deferred (approved): no G7 UI criterion.
+- New `pixel_budget` code kept out of 03 Â§3.11 (S6 canvas-code pattern).
+- Cache-copy watermark instead of baking into the live canvas (counts stay
+  current, reads still never refold).
+
+## Follow-ups
+
+- Hosted CI: <run id after push>; G7 fully closed.
+- S8 next: collaborative agent plots per 06 plan.
