@@ -324,5 +324,5 @@ bad_limit` naming the max; `to <= from` is 400).
 
 ## Follow-ups
 
-- Hosted CI: <run id after push>; G7 fully closed.
+- Hosted CI green on both runners (run 36381152015); G7 fully closed.
 - S8 next: collaborative agent plots per 06 plan.
