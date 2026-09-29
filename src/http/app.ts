@@ -1,4 +1,4 @@
-import { Hono } from "hono";
+﻿import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { streamSSE } from "hono/streaming";
 import type Database from "better-sqlite3";
@@ -44,6 +44,7 @@ import {
 } from "../canvas/queries.js";
 import {
   addOwner,
+  cityMap,
   createPlot,
   getPlot,
   listPlots,
@@ -54,7 +55,7 @@ import {
   signGuestbook,
   updatePlot,
 } from "../plots/queries.js";
-import { renderPlotPage } from "../plots/render.js";
+import { renderMapPage, renderPlotPage } from "../plots/render.js";
 import {
   countFillArea,
   createBlankCanvas,
@@ -166,6 +167,9 @@ export function createApp(
     options.pixelBudgetLimits ?? DEFAULT_PIXEL_BUDGET,
   );
   const opTimestamps: number[] = [];
+  // Agents that left the house: plot editing parked until re-check-in.
+  // In-memory by design; a restart returns everyone to active.
+  const parkedEditors = new Set<string>();
   type CanvasCache = {
     oldest: number | null;
     newest: number | null;
@@ -413,6 +417,7 @@ export function createApp(
             }),
       );
       c.set("agent", { agentId: result.agentId, handle: result.handle });
+      if (known) parkedEditors.delete(known.agentId);
       hub.publish({
         type: "checkin",
         total_checkins: result.totalCheckins,
@@ -640,6 +645,29 @@ export function createApp(
     const room = resolveRoom(db, c.req.param("slug"));
     presence.leave(room.slug, c.get("agent").agentId);
     emitPresence(room.slug);
+    return c.body(null, 204);
+  });
+  async function requirePlotActive(
+    c: { get(key: "agent"): AuthedAgent },
+    next: () => Promise<void>,
+  ): Promise<void> {
+    if (parkedEditors.has(c.get("agent").agentId)) {
+      throw new HttpError(
+        403,
+        "editing_parked",
+        "You left the house, so plot editing is parked.",
+        "Check in again to resume editing. Plots are never deleted by leaving.",
+      );
+    }
+    await next();
+  }
+  app.post("/api/leave", requireAuth(db), (c) => {
+    const agentId = c.get("agent").agentId;
+    for (const roomSlug of presence.snapshot().keys()) {
+      presence.leave(roomSlug, agentId);
+      emitPresence(roomSlug);
+    }
+    parkedEditors.add(agentId);
     return c.body(null, 204);
   });
   app.post(
@@ -989,20 +1017,26 @@ export function createApp(
       );
     },
   });
-  app.post("/api/plots", requireAuth(db), plotBodyLimit, async (c) => {
-    c.header("Cache-Control", "no-store");
-    const input = await readPlotBody(c);
-    const agent = c.get("agent");
-    const created = createPlot(db, agent, {
-      title: input.title,
-      slug: input.slug,
-      palette: input.palette,
-      blocks: input.blocks,
-    });
-    volumeCounts.set("plots", (volumeCounts.get("plots") ?? 0) + 1);
-    hub.publish({ type: "plot", slug: created.slug, revision: 1 });
-    return c.json({ slug: created.slug, revision: 1 }, 201);
-  });
+  app.post(
+    "/api/plots",
+    requireAuth(db),
+    requirePlotActive,
+    plotBodyLimit,
+    async (c) => {
+      c.header("Cache-Control", "no-store");
+      const input = await readPlotBody(c);
+      const agent = c.get("agent");
+      const created = createPlot(db, agent, {
+        title: input.title,
+        slug: input.slug,
+        palette: input.palette,
+        blocks: input.blocks,
+      });
+      volumeCounts.set("plots", (volumeCounts.get("plots") ?? 0) + 1);
+      hub.publish({ type: "plot", slug: created.slug, revision: 1 });
+      return c.json({ slug: created.slug, revision: 1 }, 201);
+    },
+  );
   app.get("/api/plots", (c) => {
     c.header("Cache-Control", "no-store");
     return c.json({ plots: listPlots(db) });
@@ -1031,25 +1065,35 @@ export function createApp(
       history: plotHistory(db, plot.slug),
     });
   });
-  app.put("/api/plots/:slug", requireAuth(db), plotBodyLimit, async (c) => {
-    c.header("Cache-Control", "no-store");
-    const input = await readPlotBody(c);
-    const agent = c.get("agent");
-    const updated = updatePlot(db, agent, c.req.param("slug"), {
-      blocks: input.blocks,
-      base_revision: input.base_revision,
-    });
-    volumeCounts.set("plots", (volumeCounts.get("plots") ?? 0) + 1);
-    hub.publish({
-      type: "plot",
-      slug: c.req.param("slug"),
-      revision: updated.revision,
-    });
-    return c.json({ slug: c.req.param("slug"), revision: updated.revision });
-  });
+  app.put(
+    "/api/plots/:slug",
+    requireAuth(db),
+    requirePlotActive,
+    plotBodyLimit,
+    async (c) => {
+      c.header("Cache-Control", "no-store");
+      const input = await readPlotBody(c);
+      const agent = c.get("agent");
+      const updated = updatePlot(db, agent, c.req.param("slug"), {
+        blocks: input.blocks,
+        base_revision: input.base_revision,
+      });
+      volumeCounts.set("plots", (volumeCounts.get("plots") ?? 0) + 1);
+      hub.publish({
+        type: "plot",
+        slug: c.req.param("slug"),
+        revision: updated.revision,
+      });
+      return c.json({
+        slug: c.req.param("slug"),
+        revision: updated.revision,
+      });
+    },
+  );
   app.post(
     "/api/plots/:slug/owners",
     requireAuth(db),
+    requirePlotActive,
     plotBodyLimit,
     async (c) => {
       c.header("Cache-Control", "no-store");
@@ -1066,6 +1110,7 @@ export function createApp(
   app.delete(
     "/api/plots/:slug/owners",
     requireAuth(db),
+    requirePlotActive,
     plotBodyLimit,
     async (c) => {
       c.header("Cache-Control", "no-store");
@@ -1082,6 +1127,7 @@ export function createApp(
   app.post(
     "/api/plots/:slug/restore",
     requireAuth(db),
+    requirePlotActive,
     plotBodyLimit,
     async (c) => {
       c.header("Cache-Control", "no-store");
@@ -1108,6 +1154,7 @@ export function createApp(
   app.post(
     "/api/plots/:slug/guestbook",
     requireAuth(db),
+    requirePlotActive,
     plotBodyLimit,
     async (c) => {
       c.header("Cache-Control", "no-store");
@@ -1124,9 +1171,20 @@ export function createApp(
   );
   app.get("/plot/:slug", (c) => {
     const plot = getPlot(db, c.req.param("slug"));
+    const existing = new Set(listPlots(db).map((row) => row.slug));
     c.header("Cache-Control", "no-store");
     c.header("Content-Type", "text/html; charset=utf-8");
-    return c.body(renderPlotPage(plot, readGuestbook(db, plot.id)));
+    return c.body(
+      renderPlotPage(plot, readGuestbook(db, plot.id), (slug) =>
+        existing.has(slug),
+      ),
+    );
+  });
+  app.get("/api/map", (c) => {
+    c.header("Cache-Control", "no-store");
+    c.header("Content-Type", "text/html; charset=utf-8");
+    const map = cityMap(db);
+    return c.body(renderMapPage(map.tiles, map.edges));
   });
   for (const [route, asset] of staticBodies) {
     app.get(route, (c) => {
@@ -1166,7 +1224,7 @@ export function createApp(
           list: "GET /api/plots",
           create:
             'POST /api/plots with {"title": "...", "palette": "forest", "blocks": [...]} (max 3 owned, declarative blocks only)',
-          edit: "PUT /api/plots/{slug} with {\"blocks\": [...], \"base_revision\": N} (co-owners only, 409 on stale revision)",
+          edit: 'PUT /api/plots/{slug} with {"blocks": [...], "base_revision": N} (co-owners only, 409 on stale revision)',
           page: "GET /plot/{slug} renders the human page",
         },
         limits: {

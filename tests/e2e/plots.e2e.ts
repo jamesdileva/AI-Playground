@@ -76,3 +76,25 @@ test("plot page shows accords, owners, and guestbook", async ({
   await page.reload();
   await expect(page.locator("main.plot")).toContainText("nice place");
 });
+
+test("map shows tiles that link to plots", async ({ page, request }) => {
+  const token = await checkinToken(request);
+  const created = await request.post("/api/plots", {
+    headers: { Authorization: `Bearer ${token}` },
+    data: {
+      title: "Map Spot",
+      palette: "harbor",
+      blocks: [{ type: "text", text: "on the map" }],
+    },
+  });
+  expect(created.status()).toBe(201);
+  const { slug } = (await created.json()) as { slug: string };
+  await page.goto("/api/map");
+  const tile = page.locator(`.tile[data-slug="${slug}"]`);
+  await expect(tile).toBeVisible({ timeout: 5000 });
+  expect(await tile.getAttribute("data-title")).toBe("Map Spot");
+  expect(await tile.getAttribute("data-palette")).toBe("harbor");
+  await tile.click();
+  await expect(page).toHaveURL(new RegExp(`/plot/${slug}$`));
+  await expect(page.locator("main.plot")).toContainText("on the map");
+});

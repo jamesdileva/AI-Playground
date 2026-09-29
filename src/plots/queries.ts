@@ -547,6 +547,7 @@ export function listPlots(db: Database.Database): Array<{
   palette: string;
   founder: string;
   owners: number;
+  guestbooks: number;
   revision: number;
   updated_at: number;
 }> {
@@ -563,22 +564,111 @@ export function listPlots(db: Database.Database): Array<{
       updated_at: number;
     }>;
     return rows.map((row) => {
-      const plot = db
-        .prepare("SELECT id FROM plots WHERE slug = ?")
-        .get(row.slug) as {
+      const plot = db.prepare("SELECT id FROM plots WHERE slug = ?").get(row.slug) as {
         id: number;
       };
+      const guests = db
+        .prepare("SELECT COUNT(*) AS count FROM plot_guestbook WHERE plot_id = ?")
+        .get(plot.id) as { count: number };
       return {
         slug: row.slug,
         title: row.title,
         palette: row.palette,
         founder: row.founder,
         owners: ownerIdsOf(db, plot.id).length,
+        guestbooks: guests.count,
         revision: latestRevision(db, plot.id),
         updated_at: row.updated_at,
       };
     });
   });
+}
+
+export function plotLinkTarget(href: string): string | null {
+  const match = /^\/plot\/([^/?#]+)$/.exec(href);
+  return match ? match[1]! : null;
+}
+
+export type MapTile = {
+  slug: string;
+  title: string;
+  palette: string;
+  founder: string;
+  owners: string[];
+  guestbooks: number;
+  revision: number;
+  updated_at: number;
+  links: string[];
+};
+
+export function cityMap(db: Database.Database): {
+  tiles: MapTile[];
+  edges: Array<{ from: string; to: string }>;
+} {
+  const plots = databaseOperation(
+    () =>
+      db
+        .prepare(
+          "SELECT p.slug AS slug, p.title AS title, p.palette AS palette, a.handle AS founder, p.blocks_json AS blocks, p.updated_at AS updated_at FROM plots p JOIN agents a ON a.id = p.created_by ORDER BY p.id",
+        )
+        .all() as Array<{
+        slug: string;
+        title: string;
+        palette: string;
+        founder: string;
+        blocks: string;
+        updated_at: number;
+      }>,
+  );
+  const bySlug = new Map<string, { owners: Set<string>; links: string[] }>();
+  const tiles: MapTile[] = plots.map((row) => {
+    const plot = databaseOperation(
+      () =>
+        db.prepare("SELECT id FROM plots WHERE slug = ?").get(row.slug) as {
+          id: number;
+        },
+    );
+    const owners = new Set([...ownersOf(db, plot.id), row.founder]);
+    const guests = databaseOperation(
+      () =>
+        db
+          .prepare("SELECT COUNT(*) AS count FROM plot_guestbook WHERE plot_id = ?")
+          .get(plot.id) as { count: number },
+    );
+    const blocks = JSON.parse(row.blocks) as PlotBlock[];
+    const links: string[] = [];
+    for (const block of blocks) {
+      if (block.type !== "link") continue;
+      const target = plotLinkTarget(block.href);
+      if (target) links.push(target);
+    }
+    const revision = latestRevision(db, plot.id);
+    bySlug.set(row.slug, { owners, links });
+    return {
+      slug: row.slug,
+      title: row.title,
+      palette: row.palette,
+      founder: row.founder,
+      owners: [...owners],
+      guestbooks: guests.count,
+      revision,
+      updated_at: row.updated_at,
+      links,
+    };
+  });
+  const existing = new Set(tiles.map((tile) => tile.slug));
+  const edges: Array<{ from: string; to: string }> = [];
+  for (const tile of tiles) {
+    const owners = bySlug.get(tile.slug)!.owners;
+    for (const target of tile.links) {
+      if (!existing.has(target)) continue;
+      const targetOwners = bySlug.get(target)!.owners;
+      if ([...owners].some((owner) => targetOwners.has(owner))) {
+        edges.push({ from: tile.slug, to: target });
+      }
+    }
+  }
+  return { tiles, edges };
 }
 
 function requireOwner(

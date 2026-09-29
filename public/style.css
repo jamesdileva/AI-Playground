@@ -290,6 +290,70 @@ body.palette-harbor,
   --accent: #7a5fa0;
 }
 
+.map {
+  position: relative;
+  margin: 0 1.25rem 1.25rem;
+  min-height: 12rem;
+}
+
+.map .wires {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.map .wires line {
+  stroke: var(--accent);
+  stroke-width: 2;
+  opacity: 0.6;
+}
+
+.map .tile {
+  position: absolute;
+  width: 220px;
+  height: 140px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-top: 4px solid var(--accent);
+  border-radius: 8px;
+  padding: 0.5rem 0.75rem;
+  color: inherit;
+  text-decoration: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  box-sizing: border-box;
+}
+
+.map .tile-title {
+  font-weight: 700;
+}
+
+.map .tile-meta {
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.map .tile.palette-forest {
+  --accent: #2f6f4f;
+}
+
+.map .tile.palette-sunset {
+  --accent: #c96f2e;
+}
+
+.map .tile.palette-mono {
+  --accent: #6f6a5e;
+}
+
+.map .tile.palette-slate {
+  --accent: #4a7fb5;
+}
+
+.map .tile.palette-harbor {
+  --accent: #7a5fa0;
+}
+
 #board {
   background: var(--panel);
   border: 1px solid var(--line);

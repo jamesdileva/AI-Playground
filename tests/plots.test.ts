@@ -63,7 +63,10 @@ async function api(
   });
   return {
     status: response.status,
-    json: (await response.json()) as Record<string, unknown>,
+    json: (await response.json().catch(() => ({}))) as Record<
+      string,
+      unknown
+    >,
     text: async () => response.text(),
   };
 }
@@ -548,5 +551,231 @@ it("plot writes publish a feed event", async () => {
       /* Reader already closed by the abort; teardown is complete. */
     }
     await pump;
+  }
+});
+
+it("leave clears presence, parks plot editing, and recheckin resumes", async () => {
+  const { base } = await startHarness();
+  const agent = await newAgent(base);
+  const created = await api(base, "POST", "/api/plots", agent.token, {
+    title: "Kept",
+    blocks: V1,
+  });
+  expect(created.status).toBe(201);
+  const slug = created.json.slug as string;
+  const read = await fetch(`${base}/api/rooms/kitchen/messages?since=0`, {
+    headers: { Authorization: `Bearer ${agent.token}` },
+  });
+  expect(read.status).toBe(200);
+  const rooms = (await (await fetch(`${base}/api/rooms`)).json()) as {
+    rooms: Array<{ slug: string; occupants: number }>;
+  };
+  expect(rooms.rooms.find((room) => room.slug === "kitchen")?.occupants).toBe(
+    1,
+  );
+  const left = await api(base, "POST", "/api/leave", agent.token);
+  expect(left.status).toBe(204);
+  const after = (await (await fetch(`${base}/api/rooms`)).json()) as {
+    rooms: Array<{ slug: string; occupants: number }>;
+  };
+  expect(after.rooms.find((room) => room.slug === "kitchen")?.occupants).toBe(
+    0,
+  );
+  const parked = await api(base, "PUT", `/api/plots/${slug}`, agent.token, {
+    blocks: V2,
+    base_revision: 1,
+  });
+  expect(parked.status).toBe(403);
+  expect(parked.json.error).toBe("editing_parked");
+  const parkedBook = await api(
+    base,
+    "POST",
+    `/api/plots/${slug}/guestbook`,
+    agent.token,
+    { entry: "late" },
+  );
+  expect(parkedBook.status).toBe(403);
+  const kept = await api(base, "GET", `/api/plots/${slug}`, undefined);
+  expect(kept.status).toBe(200);
+  expect(kept.json.revision).toBe(1);
+  const back = await fetch(`${base}/api/checkin`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      Authorization: `Bearer ${agent.token}`,
+    },
+    body: "{}",
+  });
+  expect(back.status).toBe(201);
+  const resumed = await api(base, "PUT", `/api/plots/${slug}`, agent.token, {
+    blocks: V2,
+    base_revision: 1,
+  });
+  expect(resumed.status).toBe(200);
+  expect(resumed.json.revision).toBe(2);
+});
+
+it("unauthenticated leave returns 401", async () => {
+  const { base } = await startHarness();
+  const left = await api(base, "POST", "/api/leave", undefined);
+  expect(left.status).toBe(401);
+});
+
+function tileAttrs(html: string) {
+  const tiles: Record<string, Record<string, string>> = {};
+  const pattern =
+    /data-slug="([^"]+)" data-title="([^"]+)" data-palette="([^"]+)" data-founder="([^"]+)" data-owners="(\d+)" data-guestbooks="(\d+)"/g;
+  for (let match = pattern.exec(html); match; match = pattern.exec(html)) {
+    tiles[match[1]!] = {
+      title: match[2]!,
+      palette: match[3]!,
+      founder: match[4]!,
+      owners: match[5]!,
+      guestbooks: match[6]!,
+    };
+  }
+  return tiles;
+}
+
+it("9.1 map tiles carry title, palette, founder, owners, guestbooks", async () => {
+  const { base } = await startHarness();
+  const founder = await newAgent(base);
+  const first = await api(base, "POST", "/api/plots", founder.token, {
+    title: "Map One",
+    palette: "sunset",
+    blocks: V1,
+  });
+  expect(first.status).toBe(201);
+  const slugOne = first.json.slug as string;
+  await api(base, "POST", `/api/plots/${slugOne}/guestbook`, founder.token, {
+    entry: "first!",
+  });
+  const second = await api(base, "POST", "/api/plots", founder.token, {
+    title: "Map Two",
+    palette: "mono",
+    blocks: V1,
+  });
+  const slugTwo = second.json.slug as string;
+  const map = await fetch(`${base}/api/map`);
+  expect(map.status).toBe(200);
+  expect(map.headers.get("content-type")).toContain("text/html");
+  const tiles = tileAttrs(await map.text());
+  expect(tiles[slugOne]).toMatchObject({
+    title: "Map One",
+    palette: "sunset",
+    founder: founder.handle,
+    owners: "1",
+    guestbooks: "1",
+  });
+  expect(tiles[slugTwo]).toMatchObject({
+    title: "Map Two",
+    guestbooks: "0",
+  });
+});
+
+it("9.2 tile order is stable across reopens", async () => {
+  const { checkin } = await import("../src/door/checkin.js");
+  const { mkdtempSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const directory = mkdtempSync(join(tmpdir(), "hangout-map-"));
+  try {
+    const path = join(directory, "hangout.db");
+    const seen: string[][] = [];
+    for (let round = 0; round < 3; round++) {
+      const db = openDatabase(path);
+      try {
+        if (round === 0) {
+          for (const name of ["Zed", "Amy", "Max"]) {
+            const agent = checkin(db, { preferredHandle: name });
+            const { createPlot } = await import("../src/plots/queries.js");
+            createPlot(
+              db,
+              { agentId: agent.agentId, handle: agent.handle },
+              {
+                title: `${name} plot`,
+                blocks: [{ type: "text", text: "hi" }],
+              },
+            );
+          }
+        }
+        const { listPlots } = await import("../src/plots/queries.js");
+        seen.push(listPlots(db).map((plot) => plot.slug));
+      } finally {
+        if (db.open) db.close();
+      }
+    }
+    expect(seen[0]).toHaveLength(3);
+    expect(seen[1]).toEqual(seen[0]);
+    expect(seen[2]).toEqual(seen[0]);
+  } finally {
+    const { rmSync } = await import("node:fs");
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+it("9.3 links resolve or degrade; shared-owner links get map lines", async () => {
+  const { base } = await startHarness();
+  const founder = await newAgent(base);
+  const friend = await newAgent(base);
+  const target = await api(base, "POST", "/api/plots", founder.token, {
+    title: "Target",
+    blocks: V1,
+  });
+  const targetSlug = target.json.slug as string;
+  const source = await api(base, "POST", "/api/plots", founder.token, {
+    title: "Source",
+    blocks: [
+      { type: "link", label: "good", href: `/plot/${targetSlug}` },
+      { type: "link", label: "ghost", href: "/plot/plot-that-never-existed" },
+    ],
+  });
+  const sourceSlug = source.json.slug as string;
+  const page = await fetch(`${base}/plot/${sourceSlug}`);
+  expect(page.status).toBe(200);
+  const html = await page.text();
+  expect(html).toContain(`<a href="/plot/${targetSlug}">good</a>`);
+  expect(html).toContain("ghost</p>");
+  expect(html).not.toContain('/plot/plot-that-never-existed">');
+  const map = tileAttrs(await (await fetch(`${base}/api/map`)).text());
+  expect(Object.keys(map)).toContain(sourceSlug);
+  const raw = await (await fetch(`${base}/api/map`)).text();
+  expect(raw).toContain("<line ");
+  const loner = await api(base, "POST", "/api/plots", friend.token, {
+    title: "Loner",
+    blocks: [{ type: "link", label: "up", href: `/plot/${targetSlug}` }],
+  });
+  expect(loner.status).toBe(201);
+  const solo = await (await fetch(`${base}/api/map`)).text();
+  const lines = solo.match(/<line /g) ?? [];
+  expect(lines.length).toBe(1);
+});
+
+it("9.4 image_ref regions render from cache; bad regions 400, never 500", async () => {
+  const { base } = await startHarness();
+  const agent = await newAgent(base);
+  const created = await api(base, "POST", "/api/plots", agent.token, {
+    title: "Gallery",
+    blocks: [
+      { type: "image_ref", region: [0, 0, 999, 999], caption: "whole wall" },
+    ],
+  });
+  expect(created.status).toBe(201);
+  const slug = created.json.slug as string;
+  const page = await fetch(`${base}/plot/${slug}`);
+  expect(page.status).toBe(200);
+  expect(await page.text()).toContain(
+    "/api/canvas/snapshot?region=0,0,999,999",
+  );
+  const crop = await fetch(`${base}/api/canvas/snapshot?region=0,0,999,999`);
+  expect(crop.status).toBe(200);
+  expect(crop.headers.get("content-type")).toBe("image/png");
+  const bytes = Buffer.from(await crop.arrayBuffer());
+  expect(bytes.subarray(0, 8)).toEqual(
+    Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+  );
+  for (const bad of ["nope", "0,0,5", "0,0,999,9999", "300,300,100,100"]) {
+    const rejected = await fetch(`${base}/api/canvas/snapshot?region=${bad}`);
+    expect(rejected.status, bad).toBe(400);
   }
 });

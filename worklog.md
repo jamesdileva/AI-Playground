@@ -1,4 +1,4 @@
-﻿# Worklog - Sprints 0-8 (2026-09-17 to 2026-09-28)
+﻿# Worklog - Sprints 0-9 (2026-09-17 to 2026-09-29)
 
 ## What was done
 
@@ -374,3 +374,44 @@ bad_limit` naming the max; `to <= from` is 400).
 
 - Hosted CI green on both runners (run 36503022971); G8 fully closed.
 - S9 next: city view, links, hardening per 06 plan.
+
+# Sprint 9 (2026-09-29) â€” City view, links, hardening
+
+## What was done
+
+- `POST /api/leave` (auth): clears all-room presence and parks the token
+  (`403 editing_parked` on all six plot-write routes via middleware,
+  re-check-in unparks, restart clears); plots never deleted.
+- Map: `guestbooks` count added to plot listings; `GET /api/map`
+  (deterministic creation-order grid, tiles with data attributes, SVG
+  connection lines for link + shared-owner pairs); render-time link
+  resolution (missing targets degrade to plain text).
+- `tests/limits.test.ts` (9.9): all six 429 codes with `retry_after` +
+  hints. `tests/isolation-traffic.test.ts` (9.5): 200-message fuzz across
+  25 agents paced past cooldowns with canvas/plot writers concurrent.
+- Map tests in `plots.test.ts` (9.1 tiles, 9.2 reopen stability, 9.3
+  resolve/degrade/edges, 9.4 region faults); map e2e smoke (tile click
+  lands on the plot).
+- 50-agent mixed load (9.7: 21,685 reads, p95 18 ms, zero 5xx);
+  `VACUUM INTO` restore drill timed and verified (9.6: 16 ms backup,
+  ~3 s restore, all state intact).
+- `llms.txt` reframed (talk/draw/build, plot/guestbook/leave limits,
+  canvas-text warning); 01 Â§1.6 annotated; 06 amended (restore-in-S8,
+  history/list endpoints, `CHECKIN_LIMIT`); abuse review kept all values.
+- `CHECKIN_LIMIT` env knob (`server.ts`, default 10) + Playwright 1000
+  after 15-spec e2e flaked on the throttle; shared 429-honoring checkin
+  helper; canvas paint test uses pixel deltas.
+- Verified G9: pipeline green (93 vitest, 16 e2e, Lighthouse 1.0).
+  Record: `gates/G9-2026-09-29.md`.
+
+## Decisions and why
+
+- Park-token leave, shared-owner lines (both plan-approved options).
+- Static map (no G9 live-update criterion).
+- Unswept plots/guestbooks documented as identity (retention decision).
+- No migration, no new deps.
+
+## Follow-ups
+
+- Hosted CI: <run id after push>; G9 fully closed.
+- S10 next: gallery and finishing per 07 plan; deployment (08) last.
