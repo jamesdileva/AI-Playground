@@ -372,5 +372,5 @@ bad_limit` naming the max; `to <= from` is 400).
 
 ## Follow-ups
 
-- Hosted CI: <run id after push>; G8 fully closed.
+- Hosted CI green on both runners (run 36503022971); G8 fully closed.
 - S9 next: city view, links, hardening per 06 plan.
