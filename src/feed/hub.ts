@@ -10,7 +10,8 @@ export type FeedEvent =
   | { type: "message"; message: FeedMessage }
   | { type: "checkin"; total_checkins: number }
   | { type: "presence"; room: string; occupants: number }
-  | { type: "canvas"; first_seq: number; last_seq: number; count: number };
+  | { type: "canvas"; first_seq: number; last_seq: number; count: number }
+  | { type: "plot"; slug: string; revision: number };
 
 export type FeedSubscriber = (event: FeedEvent) => void;
 

@@ -16,6 +16,7 @@ export default defineConfig({
     env: {
       PORT: "3210",
       DB_PATH: "hangout.e2e.db",
+      CHECKIN_LIMIT: "1000",
     },
   },
 });

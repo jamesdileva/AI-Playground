@@ -6,8 +6,12 @@ const port = Number(process.env.PORT ?? "3000");
 if (!Number.isInteger(port) || port < 1 || port > 65535) {
   throw new Error("PORT must be an integer between 1 and 65535.");
 }
+const checkinLimit = Number(process.env.CHECKIN_LIMIT ?? "10");
+if (!Number.isInteger(checkinLimit) || checkinLimit < 1) {
+  throw new Error("CHECKIN_LIMIT must be a positive integer.");
+}
 const db = openDatabase();
-const app = createApp(db);
+const app = createApp(db, undefined, { checkinLimit });
 const server = serve(
   { fetch: app.fetch, hostname: "127.0.0.1", port },
   (info) => {

@@ -1,4 +1,4 @@
-﻿# Worklog - Sprints 0-7 (2026-09-17 to 2026-09-28)
+﻿# Worklog - Sprints 0-8 (2026-09-17 to 2026-09-28)
 
 ## What was done
 
@@ -326,3 +326,51 @@ bad_limit` naming the max; `to <= from` is 400).
 
 - Hosted CI green on both runners (run 36381152015); G7 fully closed.
 - S8 next: collaborative agent plots per 06 plan.
+
+# Sprint 8 (2026-09-28) â€” Collaborative agent plots
+
+## What was done
+
+- Migration `004_plots.sql`: `plots` (slug/title/palette/blocks/created_by),
+  `plot_owners` (co-ownership as a table), `plot_revisions` (immutable
+  history), `plot_guestbook` (one row per agent+plot); exported the
+  `migrations` array so count tests derive instead of hardcoding.
+- New `src/plots/queries.ts` (sole plot toucher, Rule I extended): strict
+  declarative block schema (heading/text/ascii_art/link/image_ref/colors/
+  guestbook; unknown types and html/style/script/on* keys rejected naming
+  the field), link href allowlist (http/https/relative), palette tokens,
+  30-block / 32KB ceilings, slugify with collision suffixes, 3-plot cap
+  counting co-owned rows, revision-tracked updates with trim-to-20,
+  founder/self removal rules, append-only restore, guestbook upsert with
+  60 s cooldown.
+- Routes: create/list/get/history/PUT/owners add+remove/restore/guestbook
+  plus human `GET /plot/:slug`; new codes `plot_invalid`, `plot_limit`
+  (429+3600), `plot_forbidden`, `no_such_plot/agent/revision`,
+  `entry_invalid`, `guestbook_cooldown`, `revision_conflict` (+current
+  revision via a new optional `HttpError` data bag); `plot` SSE events;
+  volume `"plots"` counting; `CHECKIN_LIMIT` env knob (default 10).
+- `src/plots/render.ts`: escaped server-side page (headings/text/pre-ascii/
+  validated links/snapshot-region img/palette classes/guestbook list);
+  palette + plot CSS; snapshot `?region=` crop for `image_ref`.
+- `llms.txt` + onboarding `plots` chapter (discovery, CRUD, owners,
+  guestbook, restore, limits, untrusted-content note).
+- Tests: `tests/plots.test.ts` (11: co-build, 403/401, cap, schema,
+  concurrent conflict, 20-revision history + restore, guestbook + upsert,
+  ceilings, owners, slugs, feed event), `tests/e2e/plots.e2e.ts` (8.5 Ã—4
+  - plot page flow), shared e2e checkin helper with 429 backoff,
+    cold-start create-then-edit 10/10 (8.10).
+- Verified G8: pipeline green (83 vitest, 15 e2e, Lighthouse 1.0).
+  Record: `gates/G8-2026-09-28.md`.
+
+## Decisions and why
+
+- Restore + history endpoint in S8 (gate 8.7 beats the stale S8 task line).
+- `GET /api/plots` added (8.10 discovery needs enumeration; approved).
+- Link allowlist, guestbook upsert, `CHECKIN_LIMIT` knob (all approved).
+- Canvas error codes stay out of 03 Â§3.11 (S6/S7 pattern).
+- Ownerless plots allowed and read-only (simplest consistent rule).
+
+## Follow-ups
+
+- Hosted CI: <run id after push>; G8 fully closed.
+- S9 next: city view, links, hardening per 06 plan.

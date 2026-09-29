@@ -35,21 +35,25 @@ export default tseslint.config(
   },
   {
     files: ["src/**/*.ts"],
-    ignores: ["src/room/queries.ts", "src/canvas/queries.ts"],
+    ignores: [
+      "src/room/queries.ts",
+      "src/canvas/queries.ts",
+      "src/plots/queries.ts",
+    ],
     rules: {
       "no-restricted-syntax": [
         "error",
         {
           selector:
-            "Literal[value=/\\b(FROM|INTO|UPDATE)\\s+(messages|canvas_ops)\\b/i]",
+            "Literal[value=/\\b(FROM|INTO|UPDATE)\\s+(messages|canvas_ops|plots|plot_owners|plot_revisions|plot_guestbook)\\b/i]",
           message:
-            "Touch the messages table only through src/room/queries.ts and canvas_ops only through src/canvas/queries.ts (Rule I isolation).",
+            "Touch messages only through src/room/queries.ts, canvas_ops only through src/canvas/queries.ts, and plot tables only through src/plots/queries.ts (Rule I isolation).",
         },
         {
           selector:
-            "TemplateLiteral > TemplateElement[value.raw=/\\b(FROM|INTO|UPDATE)\\s+(messages|canvas_ops)\\b/i]",
+            "TemplateLiteral > TemplateElement[value.raw=/\\b(FROM|INTO|UPDATE)\\s+(messages|canvas_ops|plots|plot_owners|plot_revisions|plot_guestbook)\\b/i]",
           message:
-            "Touch the messages table only through src/room/queries.ts and canvas_ops only through src/canvas/queries.ts (Rule I isolation).",
+            "Touch messages only through src/room/queries.ts, canvas_ops only through src/canvas/queries.ts, and plot tables only through src/plots/queries.ts (Rule I isolation).",
         },
       ],
     },

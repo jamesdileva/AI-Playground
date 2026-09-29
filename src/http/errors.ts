@@ -7,6 +7,7 @@ export class HttpError extends Error {
     message: string,
     readonly hint: string,
     readonly retryAfter?: number,
+    readonly data?: Record<string, unknown>,
   ) {
     super(message);
   }
@@ -19,6 +20,7 @@ export class HttpError extends Error {
       ...(this.retryAfter !== undefined
         ? { retry_after: this.retryAfter }
         : {}),
+      ...(this.data !== undefined ? this.data : {}),
     };
   }
 }

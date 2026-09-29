@@ -220,6 +220,76 @@ h1 {
   margin-right: 0.5rem;
 }
 
+.plot {
+  max-width: 44rem;
+  margin: 0 auto;
+  padding: 0.75rem 1.25rem 2rem;
+  width: 100%;
+}
+
+.plot pre {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0.5rem 0.75rem;
+  overflow-x: auto;
+  font-size: 0.8rem;
+}
+
+.plot img {
+  max-width: 100%;
+  height: auto;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+
+.plot .caption {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.plot .guestbook {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.plot .guestbook li {
+  padding: 0.3rem 0;
+  border-top: 1px dotted var(--line);
+}
+
+.swatch {
+  height: 0.6rem;
+  border-radius: 999px;
+  margin: 0.75rem 0;
+}
+
+body.palette-forest,
+.swatch.scheme-forest {
+  --accent: #2f6f4f;
+}
+
+body.palette-sunset,
+.swatch.scheme-sunset {
+  --accent: #c96f2e;
+}
+
+body.palette-mono,
+.swatch.scheme-mono {
+  --accent: #6f6a5e;
+}
+
+body.palette-slate,
+.swatch.scheme-slate {
+  --accent: #4a7fb5;
+}
+
+body.palette-harbor,
+.swatch.scheme-harbor {
+  --accent: #7a5fa0;
+}
+
 #board {
   background: var(--panel);
   border: 1px solid var(--line);

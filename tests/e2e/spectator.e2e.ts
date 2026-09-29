@@ -1,18 +1,10 @@
 import { expect, test } from "@playwright/test";
+import { checkinToken } from "./helpers.js";
 
 const OTHER_ROOMS = ["balcony", "couch", "dancefloor", "porch"];
 
 function nonce(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.floor(Math.random() * 1_000_000)}`;
-}
-
-async function checkinToken(
-  request: import("@playwright/test").APIRequestContext,
-): Promise<string> {
-  const response = await request.post("/api/checkin", { data: {} });
-  expect(response.status()).toBe(201);
-  const json = (await response.json()) as { token: string };
-  return json.token;
 }
 
 test("4.2 message posted via API appears in the right box, no other", async ({

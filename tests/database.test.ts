@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
-import { migrate, openDatabase } from "../src/database.js";
+import { migrate, migrations, openDatabase } from "../src/database.js";
 
 const connections: Database.Database[] = [];
 const directories: string[] = [];
@@ -43,6 +43,18 @@ describe("database migrations", () => {
         )
         .all(),
     ).toEqual([{ name: "canvas_ops" }]);
+    expect(
+      db
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('plots', 'plot_owners', 'plot_revisions', 'plot_guestbook') ORDER BY name",
+        )
+        .all(),
+    ).toEqual([
+      { name: "plot_guestbook" },
+      { name: "plot_owners" },
+      { name: "plot_revisions" },
+      { name: "plots" },
+    ]);
   });
   it("runs twice without any changes and preserves data across reopen", () => {
     const directory = mkdtempSync(join(tmpdir(), "hangout-"));
@@ -68,7 +80,9 @@ describe("database migrations", () => {
         .prepare("SELECT value FROM counters WHERE key = 'total_checkins'")
         .get(),
     ).toEqual({ value: 7 });
-    expect(reopened.pragma("user_version", { simple: true })).toBe(3);
+    expect(reopened.pragma("user_version", { simple: true })).toBe(
+      migrations.length,
+    );
   });
   it("rolls back schema and version if a later migration fails", () => {
     const db = new Database(":memory:");
@@ -80,7 +94,7 @@ describe("database migrations", () => {
       db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all(),
     ).toEqual([]);
     db.exec("DROP TABLE temp.rooms");
-    expect(migrate(db)).toBe(3);
+    expect(migrate(db)).toBe(migrations.length);
   });
   it("does not change journal mode or data when opening a newer database", () => {
     const directory = mkdtempSync(join(tmpdir(), "hangout-"));

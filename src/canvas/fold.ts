@@ -136,6 +136,10 @@ export function createBlankCanvas(): FoldCanvas {
   return canvas;
 }
 
+export function createCanvasRegion(w: number, h: number): FoldCanvas {
+  return createCanvas(w, h);
+}
+
 export function renderOps(canvas: FoldCanvas, ops: CanvasOp[]): void {
   const ctx = canvas.getContext("2d");
   for (const op of ops) applyOp(ctx, op);

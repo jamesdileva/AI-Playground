@@ -4,15 +4,9 @@ import {
   type APIRequestContext,
   type Page,
 } from "@playwright/test";
+import { checkinToken } from "./helpers.js";
 
 const BACKGROUND: [number, number, number] = [34, 34, 51];
-
-async function checkinToken(request: APIRequestContext): Promise<string> {
-  const response = await request.post("/api/checkin", { data: {} });
-  expect(response.status()).toBe(201);
-  const json = (await response.json()) as { token: string };
-  return json.token;
-}
 
 async function paint(
   request: APIRequestContext,
@@ -43,7 +37,7 @@ async function paintedPixels(page: Page): Promise<number> {
 test("canvas paints ops posted via the API", async ({ page, request }) => {
   await page.goto("/");
   await expect(page.locator("#canvas")).toBeVisible();
-  expect(await paintedPixels(page)).toBe(0);
+  const before = await paintedPixels(page);
   const token = await checkinToken(request);
   expect(
     await paint(request, token, [
@@ -60,7 +54,7 @@ test("canvas paints ops posted via the API", async ({ page, request }) => {
   ).toBe(201);
   await expect
     .poll(() => paintedPixels(page), { timeout: 5000 })
-    .toBeGreaterThan(1000);
+    .toBeGreaterThan(before + 1000);
 });
 
 const XSS_CASES: Array<{ name: string; payload: string }> = [

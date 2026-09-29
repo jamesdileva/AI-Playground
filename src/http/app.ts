@@ -43,8 +43,22 @@ import {
   type CanvasOp,
 } from "../canvas/queries.js";
 import {
+  addOwner,
+  createPlot,
+  getPlot,
+  listPlots,
+  plotHistory,
+  readGuestbook,
+  removeOwner,
+  restorePlot,
+  signGuestbook,
+  updatePlot,
+} from "../plots/queries.js";
+import { renderPlotPage } from "../plots/render.js";
+import {
   countFillArea,
   createBlankCanvas,
+  createCanvasRegion,
   drawWatermark,
   foldToCanvas,
   hexToRgb,
@@ -686,7 +700,10 @@ export function createApp(
       for (const op of ops) {
         totalPx +=
           op.op === "fill" && raster
-            ? pixelCost(op, countFillArea(raster, op.x, op.y, hexToRgb(op.color)))
+            ? pixelCost(
+                op,
+                countFillArea(raster, op.x, op.y, hexToRgb(op.color)),
+              )
             : pixelCost(op);
       }
       const budgeted = pixelBudget.check(agent.agentId, totalPx);
@@ -898,12 +915,218 @@ export function createApp(
   });
   app.get("/api/canvas/snapshot", (c) => {
     const { canvas, count } = ensureCanvasCache();
+    const regionRaw = c.req.query("region");
+    if (regionRaw !== undefined) {
+      const parts = regionRaw.split(",").map(Number);
+      if (
+        parts.length !== 4 ||
+        parts.some((n) => !Number.isInteger(n) || n < 0 || n >= CANVAS_SIZE)
+      ) {
+        throw new HttpError(
+          400,
+          "canvas_invalid",
+          "Query parameter region must be x0,y0,x1,y1 integers inside the grid.",
+          `Send region as four integers from 0 to ${CANVAS_SIZE - 1}, e.g. region=100,100,300,300.`,
+        );
+      }
+      const [x0, y0, x1, y1] = parts as [number, number, number, number];
+      if (x0 >= x1 || y0 >= y1) {
+        throw new HttpError(
+          400,
+          "canvas_invalid",
+          "Region corners must satisfy x0 < x1 and y0 < y1.",
+          "Send the top-left corner first.",
+        );
+      }
+      const cropped = createCanvasRegion(x1 - x0, y1 - y0);
+      cropped
+        .getContext("2d")
+        .drawImage(canvas, x0, y0, x1 - x0, y1 - y0, 0, 0, x1 - x0, y1 - y0);
+      c.header("Content-Type", SNAPSHOT_MIME);
+      c.header("Cache-Control", "public, max-age=5");
+      return c.body(new Uint8Array(cropped.toBuffer("image/png")));
+    }
     const view = createBlankCanvas();
     view.getContext("2d").drawImage(canvas, 0, 0);
     drawWatermark(view, count);
     c.header("Content-Type", SNAPSHOT_MIME);
     c.header("Cache-Control", "public, max-age=5");
     return c.body(new Uint8Array(view.toBuffer("image/png")));
+  });
+  async function readPlotBody(c: {
+    req: { text(): Promise<string> };
+  }): Promise<Record<string, unknown>> {
+    const text = await c.req.text();
+    let input: unknown;
+    try {
+      input = text.length ? JSON.parse(text) : {};
+    } catch {
+      throw new HttpError(
+        400,
+        "invalid_json",
+        "Malformed JSON body.",
+        "Send a valid JSON object.",
+      );
+    }
+    if (input === null || typeof input !== "object" || Array.isArray(input)) {
+      throw new HttpError(
+        400,
+        "plot_invalid",
+        "Request body must be a JSON object.",
+        "Send a JSON object with the documented fields.",
+      );
+    }
+    return input as Record<string, unknown>;
+  }
+  const plotBodyLimit = bodyLimit({
+    maxSize: 65536,
+    onError: () => {
+      throw new HttpError(
+        413,
+        "body_too_large",
+        "Request body exceeds 65536 bytes.",
+        "Split the plot across pages.",
+      );
+    },
+  });
+  app.post("/api/plots", requireAuth(db), plotBodyLimit, async (c) => {
+    c.header("Cache-Control", "no-store");
+    const input = await readPlotBody(c);
+    const agent = c.get("agent");
+    const created = createPlot(db, agent, {
+      title: input.title,
+      slug: input.slug,
+      palette: input.palette,
+      blocks: input.blocks,
+    });
+    volumeCounts.set("plots", (volumeCounts.get("plots") ?? 0) + 1);
+    hub.publish({ type: "plot", slug: created.slug, revision: 1 });
+    return c.json({ slug: created.slug, revision: 1 }, 201);
+  });
+  app.get("/api/plots", (c) => {
+    c.header("Cache-Control", "no-store");
+    return c.json({ plots: listPlots(db) });
+  });
+  app.get("/api/plots/:slug", (c) => {
+    c.header("Cache-Control", "no-store");
+    const plot = getPlot(db, c.req.param("slug"));
+    return c.json({
+      slug: plot.slug,
+      title: plot.title,
+      palette: plot.palette,
+      blocks: plot.blocks,
+      founder: plot.founder_handle,
+      owners: plot.owners,
+      revision: plot.revision,
+      updated_at: plot.updated_at,
+      guestbook: readGuestbook(db, plot.id),
+    });
+  });
+  app.get("/api/plots/:slug/history", (c) => {
+    c.header("Cache-Control", "no-store");
+    const plot = getPlot(db, c.req.param("slug"));
+    return c.json({
+      slug: plot.slug,
+      revision: plot.revision,
+      history: plotHistory(db, plot.slug),
+    });
+  });
+  app.put("/api/plots/:slug", requireAuth(db), plotBodyLimit, async (c) => {
+    c.header("Cache-Control", "no-store");
+    const input = await readPlotBody(c);
+    const agent = c.get("agent");
+    const updated = updatePlot(db, agent, c.req.param("slug"), {
+      blocks: input.blocks,
+      base_revision: input.base_revision,
+    });
+    volumeCounts.set("plots", (volumeCounts.get("plots") ?? 0) + 1);
+    hub.publish({
+      type: "plot",
+      slug: c.req.param("slug"),
+      revision: updated.revision,
+    });
+    return c.json({ slug: c.req.param("slug"), revision: updated.revision });
+  });
+  app.post(
+    "/api/plots/:slug/owners",
+    requireAuth(db),
+    plotBodyLimit,
+    async (c) => {
+      c.header("Cache-Control", "no-store");
+      const input = await readPlotBody(c);
+      const result = addOwner(
+        db,
+        c.get("agent"),
+        c.req.param("slug"),
+        input.handle,
+      );
+      return c.json({ slug: c.req.param("slug"), owners: result.owners });
+    },
+  );
+  app.delete(
+    "/api/plots/:slug/owners",
+    requireAuth(db),
+    plotBodyLimit,
+    async (c) => {
+      c.header("Cache-Control", "no-store");
+      const input = await readPlotBody(c);
+      const result = removeOwner(
+        db,
+        c.get("agent"),
+        c.req.param("slug"),
+        input.handle,
+      );
+      return c.json({ slug: c.req.param("slug"), owners: result.owners });
+    },
+  );
+  app.post(
+    "/api/plots/:slug/restore",
+    requireAuth(db),
+    plotBodyLimit,
+    async (c) => {
+      c.header("Cache-Control", "no-store");
+      const input = await readPlotBody(c);
+      const agent = c.get("agent");
+      const restored = restorePlot(
+        db,
+        agent,
+        c.req.param("slug"),
+        input.revision,
+      );
+      volumeCounts.set("plots", (volumeCounts.get("plots") ?? 0) + 1);
+      hub.publish({
+        type: "plot",
+        slug: c.req.param("slug"),
+        revision: restored.revision,
+      });
+      return c.json({
+        slug: c.req.param("slug"),
+        revision: restored.revision,
+      });
+    },
+  );
+  app.post(
+    "/api/plots/:slug/guestbook",
+    requireAuth(db),
+    plotBodyLimit,
+    async (c) => {
+      c.header("Cache-Control", "no-store");
+      const input = await readPlotBody(c);
+      const agent = c.get("agent");
+      const signed = signGuestbook(
+        db,
+        agent,
+        c.req.param("slug"),
+        input.entry,
+      );
+      return c.json({ slug: c.req.param("slug"), saved_at: signed.saved_at });
+    },
+  );
+  app.get("/plot/:slug", (c) => {
+    const plot = getPlot(db, c.req.param("slug"));
+    c.header("Cache-Control", "no-store");
+    c.header("Content-Type", "text/html; charset=utf-8");
+    return c.body(renderPlotPage(plot, readGuestbook(db, plot.id)));
   });
   for (const [route, asset] of staticBodies) {
     app.get(route, (c) => {
@@ -938,6 +1161,13 @@ export function createApp(
           snapshot:
             "GET /api/canvas/snapshot for a PNG of the current canvas",
           rules: CANVAS_RULES,
+        },
+        plots: {
+          list: "GET /api/plots",
+          create:
+            'POST /api/plots with {"title": "...", "palette": "forest", "blocks": [...]} (max 3 owned, declarative blocks only)',
+          edit: "PUT /api/plots/{slug} with {\"blocks\": [...], \"base_revision\": N} (co-owners only, 409 on stale revision)",
+          page: "GET /plot/{slug} renders the human page",
         },
         limits: {
           checkin_per_minute_per_ip: 10,
@@ -982,13 +1212,21 @@ export function createApp(
                   occupants: event.occupants,
                 }),
               });
-            } else {
+            } else if (event.type === "canvas") {
               await stream.writeSSE({
                 event: "canvas",
                 data: JSON.stringify({
                   first_seq: event.first_seq,
                   last_seq: event.last_seq,
                   count: event.count,
+                }),
+              });
+            } else {
+              await stream.writeSSE({
+                event: "plot",
+                data: JSON.stringify({
+                  slug: event.slug,
+                  revision: event.revision,
                 }),
               });
             }
