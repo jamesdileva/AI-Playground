@@ -292,17 +292,28 @@ function boundsOf(op: CanvasOp): [number, number, number, number] {
   }
 }
 
+export function canvasEpoch(db: Database.Database): number {
+  const row = databaseOperation(
+    () =>
+      db
+        .prepare("SELECT value FROM counters WHERE key = 'canvas_epoch'")
+        .get() as { value: number } | undefined,
+  );
+  return row?.value ?? 1;
+}
+
 export function postCanvasOps(
   db: Database.Database,
   agent: { agentId: string; handle: string },
   ops: CanvasOp[],
+  epoch: number,
+  now: number = Date.now(),
 ): { firstSeq: number; lastSeq: number; count: number; created_at: number } {
   return databaseOperation(() =>
     db
       .transaction(() => {
-        const now = Date.now();
         const insert = db.prepare(
-          "INSERT INTO canvas_ops (agent_id, handle, op_type, op_json, bounds, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+          "INSERT INTO canvas_ops (agent_id, handle, op_type, op_json, bounds, created_at, epoch) VALUES (?, ?, ?, ?, ?, ?, ?)",
         );
         let firstSeq = 0;
         let lastSeq = 0;
@@ -314,6 +325,7 @@ export function postCanvasOps(
             JSON.stringify(op),
             JSON.stringify(boundsOf(op)),
             now,
+            epoch,
           );
           const seq = Number(inserted.lastInsertRowid);
           if (firstSeq === 0) firstSeq = seq;
@@ -329,14 +341,15 @@ export function readCanvasOps(
   db: Database.Database,
   since: number,
   limit: number,
+  epoch: number,
 ): { ops: StoredCanvasOp[]; nextCursor: number; hasMore: boolean } {
   const rows = databaseOperation(
     () =>
       db
         .prepare(
-          "SELECT seq, agent_id, handle, op_json, bounds, created_at FROM canvas_ops WHERE seq > ? ORDER BY seq LIMIT ?",
+          "SELECT seq, agent_id, handle, op_json, bounds, created_at FROM canvas_ops WHERE epoch = ? AND seq > ? ORDER BY seq LIMIT ?",
         )
-        .all(since, limit + 1) as Array<{
+        .all(epoch, since, limit + 1) as Array<{
         seq: number;
         agent_id: string;
         handle: string;
@@ -362,7 +375,10 @@ export function readCanvasOps(
   };
 }
 
-export function canvasStats(db: Database.Database): {
+export function canvasStats(
+  db: Database.Database,
+  epoch: number,
+): {
   count: number;
   oldestSeq: number | null;
   newestSeq: number | null;
@@ -371,9 +387,9 @@ export function canvasStats(db: Database.Database): {
     () =>
       db
         .prepare(
-          "SELECT COUNT(*) AS count, MIN(seq) AS oldest, MAX(seq) AS newest FROM canvas_ops",
+          "SELECT COUNT(*) AS count, MIN(seq) AS oldest, MAX(seq) AS newest FROM canvas_ops WHERE epoch = ?",
         )
-        .get() as {
+        .get(epoch) as {
         count: number;
         oldest: number | null;
         newest: number | null;
@@ -382,13 +398,191 @@ export function canvasStats(db: Database.Database): {
   return { count: row.count, oldestSeq: row.oldest, newestSeq: row.newest };
 }
 
-export function sweepCanvasOps(db: Database.Database): number {
+export function sweepCanvasOps(db: Database.Database, epoch: number): number {
   return databaseOperation(() => {
     const deleted = db
       .prepare(
-        "DELETE FROM canvas_ops WHERE seq NOT IN (SELECT seq FROM canvas_ops ORDER BY seq DESC LIMIT ?)",
+        "DELETE FROM canvas_ops WHERE epoch = ? AND seq NOT IN (SELECT seq FROM canvas_ops WHERE epoch = ? ORDER BY seq DESC LIMIT ?)",
       )
-      .run(CANVAS_RETENTION_OPS);
+      .run(epoch, epoch, CANVAS_RETENTION_OPS);
     return Number(deleted.changes);
   });
+}
+
+export function epochContributors(
+  db: Database.Database,
+  epoch: number,
+): { distinct: number; lastOpAt: number | null; handles: string[] } {
+  const rows = databaseOperation(
+    () =>
+      db
+        .prepare(
+          "SELECT agent_id, handle, MAX(created_at) AS last_at FROM canvas_ops WHERE epoch = ? GROUP BY agent_id",
+        )
+        .all(epoch) as Array<{
+        agent_id: string;
+        handle: string;
+        last_at: number;
+      }>,
+  );
+  return {
+    distinct: rows.length,
+    lastOpAt: rows.length
+      ? Math.max(...rows.map((row) => row.last_at))
+      : null,
+    handles: [...new Set(rows.map((row) => row.handle))].sort(),
+  };
+}
+
+export function hasEpochOp(
+  db: Database.Database,
+  epoch: number,
+  agentId: string,
+): boolean {
+  return databaseOperation(
+    () =>
+      db
+        .prepare(
+          "SELECT seq FROM canvas_ops WHERE epoch = ? AND agent_id = ? LIMIT 1",
+        )
+        .get(epoch, agentId) !== undefined,
+  );
+}
+
+export type GalleryCanvas = {
+  epoch: number;
+  seq_start: number;
+  seq_end: number;
+  snapshot_blob: Buffer;
+  contributors: string[];
+  proposed_by: string;
+  confirmed_by: string | null;
+  finished_at: number;
+};
+
+export function commitFinishedEpoch(
+  db: Database.Database,
+  row: {
+    epoch: number;
+    seqStart: number;
+    seqEnd: number;
+    png: Buffer;
+    contributors: string[];
+    proposedBy: string;
+    confirmedBy: string | null;
+    finishedAt: number;
+  },
+): void {
+  databaseOperation(() =>
+    db
+      .transaction(() => {
+        const current = (
+          db
+            .prepare("SELECT value FROM counters WHERE key = 'canvas_epoch'")
+            .get() as { value: number } | undefined
+        )?.value;
+        if (current !== row.epoch) {
+          throw new HttpError(
+            409,
+            "finish_consumed",
+            "Another confirm already closed this epoch.",
+            "Read the gallery for the finished epoch.",
+          );
+        }
+        db.prepare(
+          "INSERT INTO gallery_canvases (epoch, seq_start, seq_end, snapshot_blob, contributors, proposed_by, confirmed_by, finished_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        ).run(
+          row.epoch,
+          row.seqStart,
+          row.seqEnd,
+          row.png,
+          JSON.stringify(row.contributors),
+          row.proposedBy,
+          row.confirmedBy,
+          row.finishedAt,
+        );
+        db.prepare(
+          "UPDATE counters SET value = ? WHERE key = 'canvas_epoch'",
+        ).run(row.epoch + 1);
+      })
+      .immediate(),
+  );
+}
+
+export function galleryCanvasCount(db: Database.Database): number {
+  return databaseOperation(
+    () =>
+      (
+        db
+          .prepare("SELECT COUNT(*) AS count FROM gallery_canvases")
+          .get() as {
+          count: number;
+        }
+      ).count,
+  );
+}
+
+export function galleryCanvas(db: Database.Database, epoch: number) {
+  const row = databaseOperation(
+    () =>
+      db
+        .prepare("SELECT * FROM gallery_canvases WHERE epoch = ?")
+        .get(epoch) as
+        | {
+            epoch: number;
+            seq_start: number;
+            seq_end: number;
+            snapshot_blob: Buffer;
+            contributors: string;
+            proposed_by: string;
+            confirmed_by: string | null;
+            finished_at: number;
+          }
+        | undefined,
+  );
+  if (!row) return undefined;
+  return {
+    epoch: row.epoch,
+    seq_start: row.seq_start,
+    seq_end: row.seq_end,
+    snapshot_png: (row.snapshot_blob as Buffer).toString("base64"),
+    contributors: JSON.parse(row.contributors) as string[],
+    proposed_by: row.proposed_by,
+    confirmed_by: row.confirmed_by,
+    finished_at: row.finished_at,
+  };
+}
+
+export function listGalleryCanvases(
+  db: Database.Database,
+  limit: number,
+  offset: number,
+): Array<{
+  epoch: number;
+  seq_start: number;
+  seq_end: number;
+  contributors: string[];
+  finished_at: number;
+}> {
+  return databaseOperation(() =>
+    (
+      db
+        .prepare(
+          "SELECT epoch, seq_start, seq_end, contributors, finished_at FROM gallery_canvases ORDER BY epoch DESC LIMIT ? OFFSET ?",
+        )
+        .all(limit, offset) as Array<{
+        epoch: number;
+        seq_start: number;
+        seq_end: number;
+        contributors: string;
+        finished_at: number;
+      }>
+    ).map((row) => ({
+      epoch: row.epoch,
+      seq_start: row.seq_start,
+      seq_end: row.seq_end,
+      contributors: JSON.parse(row.contributors) as string[],
+      finished_at: row.finished_at,
+    })),
+  );
 }

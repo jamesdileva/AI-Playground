@@ -11,6 +11,7 @@ export const migrations = [
   "002_seed_rooms.sql",
   "003_canvas.sql",
   "004_plots.sql",
+  "005_gallery.sql",
 ];
 
 export function migrate(db: Database.Database): number {

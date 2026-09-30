@@ -400,6 +400,24 @@ function plotRow(db: Database.Database, slug: string) {
         | undefined,
   );
   if (!row) {
+    const retired = databaseOperation(
+      () =>
+        db
+          .prepare(
+            "SELECT id FROM gallery_plots WHERE original_slug = ? LIMIT 1",
+          )
+          .get(slug) !== undefined,
+    );
+    if (retired) {
+      throw new HttpError(
+        410,
+        "plot_retired",
+        `Plot "${slug}" was retired to the gallery.`,
+        "Read the archived plot instead; it can no longer be written.",
+        undefined,
+        { gallery: `/api/gallery/plot/${slug}` },
+      );
+    }
     failPlot(
       404,
       "no_such_plot",
@@ -564,11 +582,15 @@ export function listPlots(db: Database.Database): Array<{
       updated_at: number;
     }>;
     return rows.map((row) => {
-      const plot = db.prepare("SELECT id FROM plots WHERE slug = ?").get(row.slug) as {
+      const plot = db
+        .prepare("SELECT id FROM plots WHERE slug = ?")
+        .get(row.slug) as {
         id: number;
       };
       const guests = db
-        .prepare("SELECT COUNT(*) AS count FROM plot_guestbook WHERE plot_id = ?")
+        .prepare(
+          "SELECT COUNT(*) AS count FROM plot_guestbook WHERE plot_id = ?",
+        )
         .get(plot.id) as { count: number };
       return {
         slug: row.slug,
@@ -632,7 +654,9 @@ export function cityMap(db: Database.Database): {
     const guests = databaseOperation(
       () =>
         db
-          .prepare("SELECT COUNT(*) AS count FROM plot_guestbook WHERE plot_id = ?")
+          .prepare(
+            "SELECT COUNT(*) AS count FROM plot_guestbook WHERE plot_id = ?",
+          )
           .get(plot.id) as { count: number },
     );
     const blocks = JSON.parse(row.blocks) as PlotBlock[];
@@ -963,5 +987,127 @@ export function readGuestbook(
         entry: string;
         saved_at: number;
       }>,
+  );
+}
+
+export function retireToGallery(
+  db: Database.Database,
+  agent: { agentId: string; handle: string },
+  slug: string,
+): { gallery: string } {
+  return databaseOperation(() =>
+    db
+      .transaction(() => {
+        const row = plotRow(db, slug);
+        if (row.created_by !== agent.agentId) {
+          failPlot(
+            403,
+            "plot_forbidden",
+            "Only the plot founder may retire it.",
+            "Co-owners may leave with DELETE /api/plots/{slug}/owners, but only the founder can end the plot.",
+          );
+        }
+        const owners = ownersOf(db, row.id);
+        const revision = latestRevision(db, row.id);
+        const now = Date.now();
+        db.prepare(
+          "INSERT INTO gallery_plots (original_slug, blocks_json, final_revision, founder, co_owners, retired_at) VALUES (?, ?, ?, ?, ?, ?)",
+        ).run(
+          row.slug,
+          row.blocks_json,
+          revision,
+          agent.handle,
+          JSON.stringify(owners),
+          now,
+        );
+        db.prepare("DELETE FROM plot_guestbook WHERE plot_id = ?").run(
+          row.id,
+        );
+        db.prepare("DELETE FROM plot_owners WHERE plot_id = ?").run(row.id);
+        db.prepare("DELETE FROM plot_revisions WHERE plot_id = ?").run(
+          row.id,
+        );
+        db.prepare("DELETE FROM plots WHERE id = ?").run(row.id);
+        return { gallery: `/api/gallery/plot/${row.slug}` };
+      })
+      .immediate(),
+  );
+}
+
+export function galleryPlotCount(db: Database.Database): number {
+  return databaseOperation(
+    () =>
+      (
+        db.prepare("SELECT COUNT(*) AS count FROM gallery_plots").get() as {
+          count: number;
+        }
+      ).count,
+  );
+}
+
+export function getGalleryPlot(db: Database.Database, slug: string) {
+  const row = databaseOperation(
+    () =>
+      db
+        .prepare(
+          "SELECT original_slug, blocks_json, final_revision, founder, co_owners, retired_at FROM gallery_plots WHERE original_slug = ? ORDER BY retired_at DESC LIMIT 1",
+        )
+        .get(slug) as
+        | {
+            original_slug: string;
+            blocks_json: string;
+            final_revision: number;
+            founder: string;
+            co_owners: string;
+            retired_at: number;
+          }
+        | undefined,
+  );
+  if (!row) {
+    failPlot(
+      404,
+      "no_such_plot",
+      `There is no retired plot called "${slug}".`,
+      "List retired plots with GET /api/gallery.",
+    );
+  }
+  return {
+    slug: row.original_slug,
+    blocks: JSON.parse(row.blocks_json) as PlotBlock[],
+    final_revision: row.final_revision,
+    founder: row.founder,
+    co_owners: JSON.parse(row.co_owners) as string[],
+    retired_at: row.retired_at,
+  };
+}
+
+export function listGalleryPlots(
+  db: Database.Database,
+  limit: number,
+  offset: number,
+): Array<{
+  slug: string;
+  final_revision: number;
+  founder: string;
+  retired_at: number;
+}> {
+  return databaseOperation(() =>
+    (
+      db
+        .prepare(
+          "SELECT original_slug AS slug, final_revision, founder, retired_at FROM gallery_plots ORDER BY retired_at DESC, id DESC LIMIT ? OFFSET ?",
+        )
+        .all(limit, offset) as Array<{
+        slug: string;
+        final_revision: number;
+        founder: string;
+        retired_at: number;
+      }>
+    ).map((row) => ({
+      slug: row.slug,
+      final_revision: row.final_revision,
+      founder: row.founder,
+      retired_at: row.retired_at,
+    })),
   );
 }

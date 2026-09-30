@@ -111,6 +111,8 @@ async function bootstrap() {
   }
   const stats = await fetchJson("/api/stats");
   counter.textContent = `${stats.total_checkins}`;
+  galleryCount.textContent =
+    stats.finished_canvases > 0 ? `${stats.finished_canvases} finished` : "";
   for (const box of rooms.values()) {
     const history = await fetchJson(
       `/api/rooms/${box.slug}/messages?since=0&limit=200`,
@@ -137,6 +139,8 @@ async function refreshAll() {
     }
     const stats = await fetchJson("/api/stats");
     counter.textContent = `${stats.total_checkins}`;
+    galleryCount.textContent =
+      stats.finished_canvases > 0 ? `${stats.finished_canvases} finished` : "";
     await syncCanvas();
   } catch {
     return;
@@ -203,7 +207,16 @@ function connect() {
       return;
     }
   });
-  source.addEventListener("canvas", () => {
+  source.addEventListener("canvas", (event) => {
+    try {
+      const data = JSON.parse(event.data);
+      if (data.epoch !== undefined && data.epoch !== canvasEpoch) {
+        canvasEpoch = data.epoch;
+        clearCanvas();
+      }
+    } catch {
+      return;
+    }
     void syncCanvas();
   });
   source.onerror = () => {
@@ -221,7 +234,16 @@ const CANVAS_BACKGROUND = "#222233";
 const canvasEl = document.getElementById("canvas");
 const canvasCtx = canvasEl.getContext("2d");
 const canvasCount = document.getElementById("canvas-count");
+const galleryCount = document.getElementById("gallery-count");
 let canvasLastSeq = 0;
+let canvasEpoch = 1;
+
+function clearCanvas() {
+  canvasCtx.fillStyle = CANVAS_BACKGROUND;
+  canvasCtx.fillRect(0, 0, GRID, GRID);
+  canvasLastSeq = 0;
+  renderCanvasCount(0);
+}
 
 function hexToRgb(hex) {
   return [
@@ -318,6 +340,11 @@ function renderCanvasCount(seq) {
 }
 
 async function syncCanvas() {
+  const meta = await fetchJson("/api/canvas/meta");
+  if (meta.epoch !== canvasEpoch) {
+    canvasEpoch = meta.epoch;
+    clearCanvas();
+  }
   for (;;) {
     const history = await fetchJson(
       `/api/canvas?since=${canvasLastSeq}&limit=500`,

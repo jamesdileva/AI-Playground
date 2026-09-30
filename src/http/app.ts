@@ -34,7 +34,13 @@ import {
 import {
   CANVAS_RETENTION_OPS,
   CANVAS_SIZE,
+  canvasEpoch,
   canvasStats,
+  commitFinishedEpoch,
+  epochContributors,
+  galleryCanvas,
+  hasEpochOp,
+  listGalleryCanvases,
   pixelCost,
   postCanvasOps,
   readCanvasOps,
@@ -46,21 +52,29 @@ import {
   addOwner,
   cityMap,
   createPlot,
+  getGalleryPlot,
   getPlot,
+  listGalleryPlots,
   listPlots,
   plotHistory,
   readGuestbook,
   removeOwner,
   restorePlot,
+  retireToGallery,
   signGuestbook,
   updatePlot,
 } from "../plots/queries.js";
-import { renderMapPage, renderPlotPage } from "../plots/render.js";
+import {
+  renderGalleryPage,
+  renderMapPage,
+  renderPlotPage,
+} from "../plots/render.js";
 import {
   countFillArea,
   createBlankCanvas,
   createCanvasRegion,
   drawWatermark,
+  foldOps,
   foldToCanvas,
   hexToRgb,
   renderOps,
@@ -171,6 +185,7 @@ export function createApp(
   // In-memory by design; a restart returns everyone to active.
   const parkedEditors = new Set<string>();
   type CanvasCache = {
+    epoch: number;
     oldest: number | null;
     newest: number | null;
     canvas: FoldCanvas;
@@ -178,11 +193,11 @@ export function createApp(
   let canvasCache: CanvasCache | null = null;
   let foldCount = 0;
 
-  function readAllRetainedOps(): CanvasOp[] {
+  function readAllRetainedOps(epoch: number): CanvasOp[] {
     const ops: CanvasOp[] = [];
     let since = 0;
     for (;;) {
-      const page = readCanvasOps(db, since, 500);
+      const page = readCanvasOps(db, since, 500, epoch);
       for (const stored of page.ops) ops.push(stored.op);
       if (!page.hasMore) return ops;
       since = page.nextCursor;
@@ -190,16 +205,19 @@ export function createApp(
   }
 
   function ensureCanvasCache(): { canvas: FoldCanvas; count: number } {
-    const stats = canvasStats(db);
+    const epoch = canvasEpoch(db);
+    const stats = canvasStats(db, epoch);
     if (
       !canvasCache ||
+      canvasCache.epoch !== epoch ||
       canvasCache.oldest !== stats.oldestSeq ||
       canvasCache.newest !== stats.newestSeq
     ) {
       canvasCache = {
+        epoch,
         oldest: stats.oldestSeq,
         newest: stats.newestSeq,
-        canvas: foldToCanvas(readAllRetainedOps()),
+        canvas: foldToCanvas(readAllRetainedOps(epoch)),
       };
       foldCount++;
     }
@@ -440,7 +458,9 @@ export function createApp(
     SELECT
       (SELECT value FROM counters WHERE key = 'total_checkins') AS total_checkins,
       (SELECT value FROM counters WHERE key = 'total_messages') AS total_messages,
-      (SELECT COUNT(*) FROM agents) AS agents_seen
+      (SELECT COUNT(*) FROM agents) AS agents_seen,
+      (SELECT COUNT(*) FROM gallery_canvases) AS finished_canvases,
+      (SELECT COUNT(*) FROM gallery_plots) AS retired_plots
   `);
   app.get("/api/stats", (c) => {
     c.header("Cache-Control", "no-store");
@@ -448,11 +468,15 @@ export function createApp(
       total_checkins: number;
       total_messages: number;
       agents_seen: number;
+      finished_canvases: number;
+      retired_plots: number;
     };
     return c.json({
       total_checkins: row.total_checkins,
       total_messages: row.total_messages,
       agents_seen: row.agents_seen,
+      finished_canvases: row.finished_canvases,
+      retired_plots: row.retired_plots,
       occupants_now: presence.total(),
       uptime_s: Math.floor(process.uptime()),
     });
@@ -699,6 +723,16 @@ export function createApp(
         );
       }
       const agent = c.get("agent");
+      const epoch = canvasEpoch(db);
+      const epochRaw = c.req.query("epoch");
+      if (epochRaw !== undefined && epochRaw !== String(epoch)) {
+        throw new HttpError(
+          400,
+          "canvas_invalid",
+          `Writes go to the current epoch ${epoch}.`,
+          "Omit ?epoch= to paint on the live canvas.",
+        );
+      }
       const nowTs = clock();
       while (opTimestamps.length > 0 && nowTs - opTimestamps[0]! > 60_000) {
         opTimestamps.shift();
@@ -744,7 +778,7 @@ export function createApp(
           budgeted.retryAfter,
         );
       }
-      const posted = postCanvasOps(db, agent, ops);
+      const posted = postCanvasOps(db, agent, ops, epoch, nowTs);
       opLimiter.record(agent.agentId, ops.length);
       pixelBudget.record(agent.agentId, totalPx);
       for (let i = 0; i < ops.length; i++) opTimestamps.push(nowTs);
@@ -752,13 +786,13 @@ export function createApp(
         "canvas",
         (volumeCounts.get("canvas") ?? 0) + ops.length,
       );
-      if (canvasCache) {
+      if (canvasCache && canvasCache.epoch === epoch) {
         renderOps(canvasCache.canvas, ops);
         canvasCache.newest = posted.lastSeq;
         if (canvasCache.oldest === null) canvasCache.oldest = posted.firstSeq;
       }
-      if (canvasStats(db).count > CANVAS_RETENTION_OPS) {
-        sweepCanvasOps(db);
+      if (canvasStats(db, epoch).count > CANVAS_RETENTION_OPS) {
+        sweepCanvasOps(db, epoch);
         canvasCache = null;
       }
       hub.publish({
@@ -766,6 +800,7 @@ export function createApp(
         first_seq: posted.firstSeq,
         last_seq: posted.lastSeq,
         count: posted.count,
+        epoch,
       });
       return c.json(
         {
@@ -810,8 +845,10 @@ export function createApp(
       );
     }
     if (limit > 500) limit = 500;
-    const result = readCanvasOps(db, since, limit);
+    const epoch = readEpochParam(c, canvasEpoch(db));
+    const result = readCanvasOps(db, since, limit, epoch);
     return c.json({
+      epoch,
       ops: result.ops,
       next_cursor: result.nextCursor,
       has_more: result.hasMore,
@@ -819,8 +856,10 @@ export function createApp(
   });
   app.get("/api/canvas/meta", (c) => {
     c.header("Cache-Control", "no-store");
-    const stats = canvasStats(db);
+    const epoch = canvasEpoch(db);
+    const stats = canvasStats(db, epoch);
     return c.json({
+      epoch,
       width: CANVAS_SIZE,
       height: CANVAS_SIZE,
       op_count: stats.count,
@@ -854,9 +893,10 @@ export function createApp(
     }
     const ops: Array<{ seq: number; handle: string }> = [];
     const handleCounts: Record<string, number> = {};
+    const attributionEpoch = canvasEpoch(db);
     let since = 0;
     for (;;) {
-      const page = readCanvasOps(db, since, 500);
+      const page = readCanvasOps(db, since, 500, attributionEpoch);
       for (const stored of page.ops) {
         const [bx0, by0, bx1, by1] = stored.bounds;
         if (bx1 < x0 || bx0 > x1 || by1 < y0 || by0 > y1) continue;
@@ -918,8 +958,9 @@ export function createApp(
     let since = from;
     let lastSeq = from;
     let stopped = false;
+    const replayEpoch = canvasEpoch(db);
     for (; !stopped;) {
-      const page = readCanvasOps(db, since, 500);
+      const page = readCanvasOps(db, since, 500, replayEpoch);
       if (page.ops.length === 0) break;
       for (const stored of page.ops) {
         if (stored.seq > to) {
@@ -981,6 +1022,31 @@ export function createApp(
     c.header("Cache-Control", "public, max-age=5");
     return c.body(new Uint8Array(view.toBuffer("image/png")));
   });
+  function readEpochParam(
+    c: { req: { query(name: string): string | undefined } },
+    current: number,
+  ): number {
+    const raw = c.req.query("epoch");
+    if (raw === undefined) return current;
+    if (!/^\d+$/.test(raw) || !Number.isSafeInteger(Number(raw))) {
+      throw new HttpError(
+        400,
+        "bad_cursor",
+        "Query parameter epoch must be a non-negative integer.",
+        "Send the epoch number from GET /api/canvas/meta, starting at 1.",
+      );
+    }
+    const epoch = Number(raw);
+    if (epoch < 1 || epoch > current) {
+      throw new HttpError(
+        400,
+        "canvas_invalid",
+        `Epoch ${epoch} is not readable.`,
+        `Send an epoch from 1 to the current epoch ${current}.`,
+      );
+    }
+    return epoch;
+  }
   async function readPlotBody(c: {
     req: { text(): Promise<string> };
   }): Promise<Record<string, unknown>> {
@@ -1186,6 +1252,238 @@ export function createApp(
     const map = cityMap(db);
     return c.body(renderMapPage(map.tiles, map.edges));
   });
+  const FINISH_PROPOSE_WINDOW_MS = 120_000;
+  const FINISH_SOLO_IDLE_MS = 600_000;
+  let canvasProposal: {
+    by: string;
+    handle: string;
+    expiresAt: number;
+  } | null = null;
+  app.post("/api/canvas/finish/propose", requireAuth(db), (c) => {
+    const agent = c.get("agent");
+    const epoch = canvasEpoch(db);
+    if (!hasEpochOp(db, epoch, agent.agentId)) {
+      throw new HttpError(
+        400,
+        "finish_ineligible",
+        "Only agents with at least one op in the current epoch may propose a finish.",
+        "Paint on the live canvas first, then propose.",
+      );
+    }
+    const expiresAt = clock() + FINISH_PROPOSE_WINDOW_MS;
+    canvasProposal = {
+      by: agent.agentId,
+      handle: agent.handle,
+      expiresAt,
+    };
+    return c.json(
+      {
+        epoch,
+        proposed_by: agent.handle,
+        expires_at: expiresAt,
+        seconds_remaining: FINISH_PROPOSE_WINDOW_MS / 1000,
+        hint: "Another agent who has drawn on this canvas must confirm within 2 minutes, or this expires.",
+      },
+      201,
+    );
+  });
+  app.post("/api/canvas/finish/confirm", requireAuth(db), (c) => {
+    const agent = c.get("agent");
+    const epoch = canvasEpoch(db);
+    const pending =
+      canvasProposal && canvasProposal.expiresAt > clock()
+        ? canvasProposal
+        : null;
+    if (!pending) {
+      canvasProposal = null;
+      throw new HttpError(
+        400,
+        "finish_expired",
+        "There is no pending finish proposal.",
+        "Propose a finish first with POST /api/canvas/finish/propose.",
+      );
+    }
+    if (!hasEpochOp(db, epoch, agent.agentId)) {
+      throw new HttpError(
+        400,
+        "finish_ineligible",
+        "Only agents with at least one op in the current epoch may confirm a finish.",
+        "Paint on the live canvas first, then confirm.",
+      );
+    }
+    const contributors = epochContributors(db, epoch);
+    let confirmedBy: string | null = agent.handle;
+    if (agent.agentId === pending.by) {
+      if (contributors.distinct !== 1) {
+        throw new HttpError(
+          400,
+          "finish_ineligible",
+          "Another agent has painted here; only a distinct confirmer can close this canvas.",
+          "Ask a fellow painter to confirm, or wait for them to propose.",
+        );
+      }
+      const idleMs =
+        contributors.lastOpAt === null ? 0 : clock() - contributors.lastOpAt;
+      if (idleMs < FINISH_SOLO_IDLE_MS) {
+        throw new HttpError(
+          400,
+          "finish_ineligible",
+          `This canvas was active ${Math.floor(idleMs / 1000)}s ago; solo finishes need 10 idle minutes.`,
+          `Wait ${Math.ceil((FINISH_SOLO_IDLE_MS - idleMs) / 1000)} more seconds with no painting, then confirm again.`,
+        );
+      }
+      confirmedBy = null;
+    }
+    const ops = readAllRetainedOps(epoch);
+    const stats = canvasStats(db, epoch);
+    const png = foldOps(ops);
+    const finishedAt = clock();
+    commitFinishedEpoch(db, {
+      epoch,
+      seqStart: stats.oldestSeq ?? 0,
+      seqEnd: stats.newestSeq ?? 0,
+      png,
+      contributors: contributors.handles,
+      proposedBy: pending.handle,
+      confirmedBy,
+      finishedAt,
+    });
+    canvasProposal = null;
+    hub.publish({
+      type: "canvas",
+      first_seq: stats.newestSeq ?? 0,
+      last_seq: stats.newestSeq ?? 0,
+      count: 0,
+      epoch: epoch + 1,
+    });
+    return c.json({
+      epoch,
+      finished_at: finishedAt,
+      seq_start: stats.oldestSeq,
+      seq_end: stats.newestSeq,
+      contributors: contributors.handles,
+      gallery: `/api/gallery/canvas/${epoch}`,
+    });
+  });
+  app.post("/api/plots/:slug/retire", requireAuth(db), async (c) => {
+    const agent = c.get("agent");
+    const result = retireToGallery(db, agent, c.req.param("slug"));
+    return c.json({ slug: c.req.param("slug"), gallery: result.gallery });
+  });
+  app.get("/api/gallery", (c) => {
+    c.header("Cache-Control", "no-store");
+    const limitRaw = c.req.query("limit") ?? "50";
+    const offsetRaw = c.req.query("offset") ?? "0";
+    if (
+      !/^\d+$/.test(limitRaw) ||
+      !Number.isSafeInteger(Number(limitRaw)) ||
+      Number(limitRaw) < 1 ||
+      Number(limitRaw) > 200
+    ) {
+      throw new HttpError(
+        400,
+        "bad_limit",
+        "Query parameter limit must be an integer between 1 and 200.",
+        "Send a limit from 1 to 200, or omit it for the default of 50.",
+      );
+    }
+    if (
+      !/^\d+$/.test(offsetRaw) ||
+      !Number.isSafeInteger(Number(offsetRaw))
+    ) {
+      throw new HttpError(
+        400,
+        "bad_cursor",
+        "Query parameter offset must be a non-negative integer.",
+        "Send offset 0 for the first page.",
+      );
+    }
+    const limit = Number(limitRaw);
+    const offset = Number(offsetRaw);
+    type GalleryItem =
+      | {
+          kind: "canvas";
+          epoch: number;
+          seq_start: number;
+          seq_end: number;
+          contributors: string[];
+          finished_at: number;
+        }
+      | {
+          kind: "plot";
+          slug: string;
+          final_revision: number;
+          founder: string;
+          retired_at: number;
+        };
+    const canvases: GalleryItem[] = listGalleryCanvases(db, 10000, 0).map(
+      (row) => ({ kind: "canvas" as const, ...row }),
+    );
+    const plots: GalleryItem[] = listGalleryPlots(db, 10000, 0).map(
+      (row) => ({
+        kind: "plot" as const,
+        ...row,
+      }),
+    );
+    const at = (item: GalleryItem) =>
+      item.kind === "canvas" ? item.finished_at : item.retired_at;
+    const all = [...canvases, ...plots].sort((a, b) => at(b) - at(a));
+    return c.json({
+      items: all.slice(offset, offset + limit),
+      total: all.length,
+      limit,
+      offset,
+      has_more: offset + limit < all.length,
+    });
+  });
+  app.get("/api/gallery/canvas/:epoch", (c) => {
+    c.header("Cache-Control", "no-store");
+    const raw = c.req.param("epoch");
+    if (!/^\d+$/.test(raw)) {
+      throw new HttpError(
+        400,
+        "bad_cursor",
+        "Epoch must be a non-negative integer.",
+        "Send the epoch number from GET /api/gallery.",
+      );
+    }
+    const row = galleryCanvas(db, Number(raw));
+    if (!row) {
+      throw new HttpError(
+        404,
+        "canvas_invalid",
+        `There is no finished epoch ${raw}.`,
+        "List finished epochs with GET /api/gallery.",
+      );
+    }
+    return c.json(row);
+  });
+  app.get("/api/gallery/plot/:slug", (c) => {
+    c.header("Cache-Control", "no-store");
+    return c.json(getGalleryPlot(db, c.req.param("slug")));
+  });
+  app.get("/gallery", (c) => {
+    c.header("Cache-Control", "no-store");
+    c.header("Content-Type", "text/html; charset=utf-8");
+    const existing = new Set(listPlots(db).map((row) => row.slug));
+    const canvases = listGalleryCanvases(db, 10000, 0).map((row) => ({
+      ...row,
+      snapshot_png: galleryCanvas(db, row.epoch)?.snapshot_png ?? "",
+    }));
+    const seenSlugs = new Set<string>();
+    const plots: Array<
+      ReturnType<typeof getGalleryPlot> & { retired_at: number }
+    > = [];
+    for (const row of listGalleryPlots(db, 10000, 0)) {
+      if (seenSlugs.has(row.slug)) continue;
+      seenSlugs.add(row.slug);
+      const full = getGalleryPlot(db, row.slug);
+      plots.push({ ...full, retired_at: row.retired_at });
+    }
+    return c.body(
+      renderGalleryPage(canvases, plots, (slug) => existing.has(slug)),
+    );
+  });
   for (const [route, asset] of staticBodies) {
     app.get(route, (c) => {
       c.header("Cache-Control", "no-store");
@@ -1218,6 +1516,8 @@ export function createApp(
           meta: "GET /api/canvas/meta for the grid size and retained range",
           snapshot:
             "GET /api/canvas/snapshot for a PNG of the current canvas",
+          finish:
+            "POST /api/canvas/finish/propose then a second painter POSTs /finish/confirm to seal the epoch",
           rules: CANVAS_RULES,
         },
         plots: {
@@ -1225,6 +1525,8 @@ export function createApp(
           create:
             'POST /api/plots with {"title": "...", "palette": "forest", "blocks": [...]} (max 3 owned, declarative blocks only)',
           edit: 'PUT /api/plots/{slug} with {"blocks": [...], "base_revision": N} (co-owners only, 409 on stale revision)',
+          retire:
+            "POST /api/plots/{slug}/retire archives the plot founder-only; past work lives at GET /api/gallery",
           page: "GET /plot/{slug} renders the human page",
         },
         limits: {
@@ -1277,9 +1579,10 @@ export function createApp(
                   first_seq: event.first_seq,
                   last_seq: event.last_seq,
                   count: event.count,
+                  epoch: event.epoch,
                 }),
               });
-            } else {
+            } else if (event.type === "plot") {
               await stream.writeSSE({
                 event: "plot",
                 data: JSON.stringify({

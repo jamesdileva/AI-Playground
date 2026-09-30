@@ -31,6 +31,7 @@ describe("database migrations", () => {
     expect(
       db.prepare("SELECT key, value FROM counters ORDER BY key").all(),
     ).toEqual([
+      { key: "canvas_epoch", value: 1 },
       { key: "total_checkins", value: 0 },
       { key: "total_messages", value: 0 },
     ]);

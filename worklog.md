@@ -1,4 +1,4 @@
-﻿# Worklog - Sprints 0-9 (2026-09-17 to 2026-09-29)
+﻿# Worklog - Sprints 0-10 (2026-09-17 to 2026-09-29)
 
 ## What was done
 
@@ -415,3 +415,53 @@ bad_limit` naming the max; `to <= from` is 400).
 
 - Hosted CI green on both runners (run 36508396556); G9 fully closed.
 - S10 next: gallery and finishing per 07 plan; deployment (08) last.
+
+# Sprint 10 (2026-09-29) â€” Gallery and finishing
+
+## What was done
+
+- Migration `005_gallery.sql`: `gallery_canvases` (epoch/range/PNG blob/
+  contributors/proposer/confirmer/finished_at), `gallery_plots` (slug/
+  blocks/final revision/founder/co-owners/retired_at), `canvas_ops.epoch`,
+  `counters.canvas_epoch = 1`. Exported `migrations` already covered it.
+- Epoch-aware canvas: `canvasEpoch`, epoch-scoped reads/stats/sweeps,
+  `?epoch=` on reads (past read-only, future 400), POST tags the epoch
+  read at handler start (validated-tagging per 07), `?epoch=` mismatch on
+  POST is 400. Snapshot cache keyed with epoch.
+- Finish protocol: propose (eligible painters only, replaces pending,
+  120 s in-memory expiry) + confirm (distinct painter, or solo after
+  10 idle minutes) â†’ fold outside, single txn (gallery insert + epoch++,
+  concurrent double-confirm gets 409), proposal cleared, canvas SSE event
+  carries the new epoch. New codes `finish_ineligible`/`finish_expired`
+  (400).
+- Plot retirement: founder-only single-txn move (gallery insert + delete
+  guestbook/owners/revisions/plots, FK-safe order); slug freed; cap counts
+  live only; `410 plot_retired` via `plotRow` (all mutating paths +
+  reads point at the gallery URL).
+- Gallery: list (mixed, newest-first, limit/offset), canvas detail (base64
+  PNG), plot detail (latest row per slug), `/gallery` page (canvas
+  thumbnails + rendered plot tiles), stats `finished_canvases` /
+  `retired_plots`, spectator gallery link + count, client epoch reset.
+- Tests: `tests/gallery.test.ts` (14: finish, solo windows, eligibility,
+  expiry, pixel-match, epoch reads/writes, sweep scoping, kill harness,
+  retire, reuse, 410, write-less routes, sweep exemption, 5Ã— race),
+  `tests/e2e/gallery.e2e.ts` (10.14 probes), pair cold-start 10/10,
+  restore drill re-run with gallery intact.
+- `llms.txt` finishing chapter + onboarding finish/retire pointers.
+- Verified G10: pipeline green (107 vitest, 18 e2e, Lighthouse 1.0).
+  Record: `gates/G10-2026-09-29.md`.
+
+## Decisions and why
+
+- Validated-epoch tagging (07 recommendation) with documented straggler
+  caveat; 10.15 asserts the exact partition instead.
+- Guestbook rows deleted at retire (FK enforcement; gallery snapshots
+  blocks + owners).
+- Gallery plot detail returns the latest row for reused slugs.
+- Watermark stays in both fold paths (6.4 untouched).
+- No scrubber UI, no remix/search (post-G10 backlog, untouched).
+
+## Follow-ups
+
+- Hosted CI: <run id after push>; G10 fully closed.
+- Next: deployment plan phase (08), then build.

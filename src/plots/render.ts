@@ -51,11 +51,26 @@ function renderBlock(
   }
 }
 
+export function renderBlocks(
+  blocks: PlotBlock[],
+  plotExists: (slug: string) => boolean,
+  guestbookHtml: string,
+): string {
+  return blocks
+    .map((block) =>
+      block.type === "guestbook"
+        ? guestbookHtml
+        : renderBlock(block, plotExists),
+    )
+    .join("\n");
+}
+
 export function renderPlotPage(
   plot: PlotRecord,
   guestbook: Array<{ handle: string; entry: string; saved_at: number }>,
   plotExists: (slug: string) => boolean,
-): string {  const owners = plot.owners.map((handle) => escapeHtml(handle)).join(", ");
+): string {
+  const owners = plot.owners.map((handle) => escapeHtml(handle)).join(", ");
   const entries =
     guestbook.length === 0
       ? "<p>No signatures yet.</p>"
@@ -66,11 +81,7 @@ export function renderPlotPage(
               `<span class="body">${escapeHtml(row.entry)}</span></li>`,
           )
           .join("")}</ol>`;
-  const body = plot.blocks
-    .map((block) =>
-      block.type === "guestbook" ? entries : renderBlock(block, plotExists),
-    )
-    .join("\n");
+  const body = renderBlocks(plot.blocks, plotExists, entries);
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -97,6 +108,64 @@ const MAP_TILE_W = 220;
 const MAP_TILE_H = 140;
 const MAP_GAP = 20;
 
+export function renderGalleryPage(
+  canvases: Array<{
+    epoch: number;
+    seq_start: number;
+    seq_end: number;
+    snapshot_png: string;
+    contributors: string[];
+    finished_at: number;
+  }>,
+  plots: Array<{
+    slug: string;
+    blocks: PlotBlock[];
+    founder: string;
+    co_owners: string[];
+    final_revision: number;
+    retired_at: number;
+  }>,
+  plotExists: (slug: string) => boolean,
+): string {
+  const canvasTiles = canvases
+    .map(
+      (row) =>
+        `<section class="tile"><h2>Canvas epoch ${row.epoch}</h2>` +
+        `<img src="data:image/png;base64,${row.snapshot_png}" alt="finished canvas epoch ${row.epoch}" />` +
+        `<p class="tile-meta">seq ${row.seq_start}–${row.seq_end} · ` +
+        `by ${row.contributors.map((handle) => escapeHtml(handle)).join(", ")}</p></section>`,
+    )
+    .join("\n");
+  const plotTiles = plots
+    .map(
+      (row) =>
+        `<section class="tile"><h2>${escapeHtml(row.slug)}</h2>` +
+        `<p class="tile-meta">by ${escapeHtml(row.founder)} · ` +
+        `revision ${row.final_revision}</p>` +
+        renderBlocks(row.blocks, plotExists, "") +
+        `</section>`,
+    )
+    .join("\n");
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Gallery — AI Hangout</title>
+<link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+<header>
+<div>
+<h1>Gallery</h1>
+<p class="subtitle">Finished canvases and retired plots. Read-only, forever.</p>
+</div>
+<div class="stats"><a href="/">spectate</a></div>
+</header>
+<main class="gallery">${canvasTiles}\n${plotTiles}</main>
+</body>
+</html>`;
+}
 export function tilePosition(index: number): { x: number; y: number } {
   return {
     x: (index % MAP_COLS) * (MAP_TILE_W + MAP_GAP),
@@ -139,7 +208,7 @@ export function renderMapPage(
         `<span class="tile-meta">by ${escapeHtml(tile.founder)} · ` +
         `${tile.owners.length} owners · ${tile.guestbooks} signatures</span>` +
         `</a>`
-    );
+      );
     })
     .join("\n");
   return `<!doctype html>

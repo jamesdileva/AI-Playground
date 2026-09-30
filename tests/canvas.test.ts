@@ -248,9 +248,10 @@ it("6.5 retention keeps exactly the newest 20,000 ops", async () => {
       db,
       { agentId: agent.agent_id, handle: agent.handle },
       batch,
+      1,
     );
   }
-  const deleted = sweepCanvasOps(db);
+  const deleted = sweepCanvasOps(db, 1);
   expect(deleted).toBe(500);
   const meta = await fetch(`${base}/api/canvas/meta`);
   expect(meta.status).toBe(200);
@@ -316,7 +317,7 @@ it("6.9 meta reports grid and retained range accurately", async () => {
   for (let n = 0; n < 10; n++) {
     postCanvasOps(db, { agentId: agent.agent_id, handle: agent.handle }, [
       FOUR_OPS[2]!,
-    ]);
+    ], 1);
   }
   const after = (await (
     await fetch(`${base}/api/canvas/meta`)
@@ -518,6 +519,7 @@ it("7.6 replay frames match incremental folds", async () => {
       db,
       mine,
       Array.from({ length: 50 }, () => ({ ...op })),
+      1,
     );
   }
   const replay = await fetch(`${base}/api/canvas/replay?from=0&to=2000`);

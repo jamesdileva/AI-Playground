@@ -94,6 +94,8 @@ it("stats are publicly readable without a bearer token", async () => {
     total_checkins: 0,
     total_messages: 0,
     agents_seen: 0,
+    finished_canvases: 0,
+    retired_plots: 0,
     occupants_now: 0,
     uptime_s: expect.any(Number),
   });
