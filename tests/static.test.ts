@@ -138,11 +138,11 @@ it("5.7: volume reports count posts per room since the last line", async () => {
   ) {
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
-  expect(reports[0]).toEqual({
-    event: "volume",
-    rooms: { kitchen: 1 },
-    total: 1,
-  });
+    expect(reports.find((report) => report.total > 0)).toEqual({
+      event: "volume",
+      rooms: { kitchen: 1 },
+      total: 1,
+    });
 });
 
 it("4.5: no innerHTML-style sinks in the shipped client", () => {

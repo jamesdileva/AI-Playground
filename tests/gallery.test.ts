@@ -670,12 +670,38 @@ it("10.8 killing the server mid-retire never leaves partial state", async () => 
         }
       }
       clearTimeout(killer);
-      for (let i = 0; i < 200 && !dead; i++) {
-        await new Promise((resolve) => setTimeout(resolve, 50));
+      const { execFileSync } = await import("node:child_process");
+      for (let i = 0; i < 150 && !dead; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        if (server.exitCode !== null) dead = true;
+        else {
+          try {
+            server.kill("SIGKILL");
+          } catch {
+            /* already gone */
+          }
+          try {
+            execFileSync("taskkill", ["/PID", String(server.pid), "/F"], {
+              stdio: "ignore",
+            });
+            dead = true;
+          } catch {
+            /* taskkill only exists on Windows; ignore */
+          }
+        }
       }
       expect(dead).toBe(true);
       expect(cycles).toBeGreaterThan(0);
-      const db = openDatabase(dbPath);
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      let db: Database.Database | null = null;
+      for (let attempt = 0; attempt < 10 && !db; attempt++) {
+        try {
+          db = openDatabase(dbPath);
+        } catch {
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+        }
+      }
+      if (!db) throw new Error("Could not reopen the killed database");
       try {
         const both = db
           .prepare(
@@ -718,6 +744,13 @@ it("10.8 killing the server mid-retire never leaves partial state", async () => 
       }
     }
   } finally {
-    rmSync(directory, { recursive: true, force: true });
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try {
+        rmSync(directory, { recursive: true, force: true });
+        break;
+      } catch {
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+    }
   }
 }, 120_000);
