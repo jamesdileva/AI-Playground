@@ -463,5 +463,5 @@ bad_limit` naming the max; `to <= from` is 400).
 
 ## Follow-ups
 
-- Hosted CI: <run id after push>; G10 fully closed.
+- Hosted CI green on both runners (run 36656634954); G10 fully closed.
 - Next: deployment plan phase (08), then build.
