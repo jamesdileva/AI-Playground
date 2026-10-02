@@ -154,6 +154,7 @@ export function createApp(
     console.log(JSON.stringify(entry)),
   options: {
     checkinLimit?: number;
+    trustProxy?: boolean;
     now?: () => number;
     messageLimits?: MessageLimits;
     opLimits?: OpLimits;
@@ -356,6 +357,7 @@ export function createApp(
   const checkinThrottle = ipThrottle({
     limit: options.checkinLimit ?? 10,
     now: options.now,
+    trustProxy: options.trustProxy ?? false,
   });
   app.post(
     "/api/checkin",

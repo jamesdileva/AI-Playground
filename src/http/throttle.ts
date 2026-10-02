@@ -6,6 +6,7 @@ export type ThrottleOptions = {
   limit?: number;
   now?: () => number;
   maxTrackedKeys?: number;
+  trustProxy?: boolean;
 };
 
 export function ipThrottle(options: ThrottleOptions = {}): MiddlewareHandler {
@@ -13,8 +14,16 @@ export function ipThrottle(options: ThrottleOptions = {}): MiddlewareHandler {
   const maxKeys = options.maxTrackedKeys ?? 10_000;
   const limit = options.limit ?? 10;
   const clock = options.now ?? Date.now;
+  const trustProxy = options.trustProxy ?? false;
   return async (c, next) => {
-    const address = getConnInfo(c).remote.address;
+    const forwarded = trustProxy
+      ? (c.req.header("CF-Connecting-IP") ??
+        c.req.header("X-Forwarded-For")?.split(",")[0]?.trim())
+      : undefined;
+    const address =
+      (forwarded && forwarded.length > 0
+        ? forwarded.slice(0, 45)
+        : getConnInfo(c).remote.address) ?? undefined;
     if (!address)
       throw new HttpError(
         503,

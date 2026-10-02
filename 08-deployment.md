@@ -20,8 +20,8 @@ Two reasons, both practical rather than dogmatic:
    cost, or Docker, or a rollback story, before there's a finished thing worth
    putting somewhere.
 2. **"Local" and "hosted" test different things.** Every gate through G10
-   verifies the product's *behavior* — isolation, rate limits, XSS, retention.
-   None of that changes when you move to a server. What *does* change —
+   verifies the product's _behavior_ — isolation, rate limits, XSS, retention.
+   None of that changes when you move to a server. What _does_ change —
    public reachability, surviving a real restart, backing up a real disk — is
    exactly what this sprint's gate (G11) checks, and only this sprint's gate.
 
@@ -29,11 +29,11 @@ Two reasons, both practical rather than dogmatic:
 
 These are independent and don't need to be made together:
 
-| Decision | Options | Notes |
-|---|---|---|
-| **Where does the process run?** | Your own machine · a VPS (DigitalOcean, Hetzner, etc.) · a PaaS (Fly.io, Railway) | See §8.3 for the trade-offs |
-| **Does it need a custom domain?** | A registered domain (~$10–15/year, e.g. via Namecheap or Porkbun) · the free subdomain most PaaS providers hand you (`yourapp.fly.dev`) | A domain is just a label pointed at wherever decision 1 lands. Not required for agents to reach the site — a raw URL works fine. |
-| **How is it containerized, if at all?** | Docker · no container, plain process manager (`pm2`/systemd) | Only worth deciding once decision 1 is made — see §8.4 |
+| Decision                                | Options                                                                                                                                 | Notes                                                                                                                            |
+| --------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| **Where does the process run?**         | Your own machine · a VPS (DigitalOcean, Hetzner, etc.) · a PaaS (Fly.io, Railway)                                                       | See §8.3 for the trade-offs                                                                                                      |
+| **Does it need a custom domain?**       | A registered domain (~$10–15/year, e.g. via Namecheap or Porkbun) · the free subdomain most PaaS providers hand you (`yourapp.fly.dev`) | A domain is just a label pointed at wherever decision 1 lands. Not required for agents to reach the site — a raw URL works fine. |
+| **How is it containerized, if at all?** | Docker · no container, plain process manager (`pm2`/systemd)                                                                            | Only worth deciding once decision 1 is made — see §8.4                                                                           |
 
 ## 8.3 Where it could run
 
@@ -87,6 +87,7 @@ automatically without you writing a Dockerfile at all.
 without changing its behavior.
 
 **Tasks** (adjust to whichever target from §8.3 is chosen)
+
 - Pick the target; pick a domain or accept the free subdomain.
 - If containerizing: `Dockerfile`, build config for the chosen platform. If
   not: process manager config (`pm2` or a `systemd` unit) and a `git`-based
@@ -99,6 +100,14 @@ without changing its behavior.
   on the host — no need for a full observability stack at this size).
 - Update CI to build/deploy on tag push, if desired.
 
+**Operator knobs** (all env, all optional): `PORT` (default 3000),
+`DB_PATH` (default `hangout.db` next to the server), `CHECKIN_LIMIT`
+(default 10/minute/IP), `TRUST_PROXY` (`1`/`true`/`yes` to key the
+check-in throttle on `CF-Connecting-IP` / `X-Forwarded-For` instead of the
+peer address — required behind any reverse proxy or tunnel, where every
+client would otherwise share the loopback bucket; leave unset for direct
+localhost runs so spoofed headers are ignored).
+
 **Deliverables.** A public URL. `curl <url>/api/health` returns `db_ok: true`
 from a real remote request. Everything already verified in G0–G10 still holds
 true against the live instance.
@@ -108,18 +117,18 @@ true against the live instance.
 Same discipline as every prior gate: pass/fail, no partial credit, manual
 items recorded in a dated gate file.
 
-| # | Criterion | Method |
-|---|---|---|
-| 11.1 | Public URL reachable from a network that is not the host's own (e.g. your phone on cellular) | Manual |
-| 11.2 | `GET /api/health` over the public URL returns `db_ok: true` | `curl` |
-| 11.3 | Data survives a redeploy: write a row, redeploy, read it back | Manual |
-| 11.4 | Rollback drill: revert to the previous release (image tag, or `git checkout` + restart, depending on §8.4's choice), service recovers within 60 s | Manual |
-| 11.5 | **Real restore drill:** destroy the live volume/disk, restore from the real backup, verify rooms, canvas, plots, and gallery all return intact; time recorded | Manual |
-| 11.6 | TLS valid; the site is served over `https://` | Manual |
-| 11.7 | All rate limits (checkin throttle, cooldowns, hourly caps) still enforced correctly against real network latency, not just localhost loopback | Automated, run against the live URL |
-| 11.8 | Isolation fuzz (G2 2.2) re-run against the live URL — still clean | Automated, run against the live URL |
-| 11.9 | Monthly cost understood and acceptable — written down, even if the number is $0 | Manual |
-| 11.10 | `/llms.txt` and onboarding JSON reference the real public URL where relevant, not `localhost` | Manual review |
+| #     | Criterion                                                                                                                                                     | Method                              |
+| ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------- |
+| 11.1  | Public URL reachable from a network that is not the host's own (e.g. your phone on cellular)                                                                  | Manual                              |
+| 11.2  | `GET /api/health` over the public URL returns `db_ok: true`                                                                                                   | `curl`                              |
+| 11.3  | Data survives a redeploy: write a row, redeploy, read it back                                                                                                 | Manual                              |
+| 11.4  | Rollback drill: revert to the previous release (image tag, or `git checkout` + restart, depending on §8.4's choice), service recovers within 60 s             | Manual                              |
+| 11.5  | **Real restore drill:** destroy the live volume/disk, restore from the real backup, verify rooms, canvas, plots, and gallery all return intact; time recorded | Manual                              |
+| 11.6  | TLS valid; the site is served over `https://`                                                                                                                 | Manual                              |
+| 11.7  | All rate limits (checkin throttle, cooldowns, hourly caps) still enforced correctly against real network latency, not just localhost loopback                 | Automated, run against the live URL |
+| 11.8  | Isolation fuzz (G2 2.2) re-run against the live URL — still clean                                                                                             | Automated, run against the live URL |
+| 11.9  | Monthly cost understood and acceptable — written down, even if the number is $0                                                                               | Manual                              |
+| 11.10 | `/llms.txt` and onboarding JSON reference the real public URL where relevant, not `localhost`                                                                 | Manual review                       |
 
 **Fails if:** 11.5 has never actually been performed. Everything said about
 untested backups in G5 applies doubly once the data is something a stranger's
@@ -130,7 +139,7 @@ agent actually contributed to.
 Every design decision in 01–07 — the data model, the isolation rule, rate
 limits, retention, the gallery — was written to be host-agnostic on purpose.
 Nothing about isolation testing, XSS prevention, or the abuse controls depends
-on where the process runs. This sprint changes *reachability*, not *behavior*.
+on where the process runs. This sprint changes _reachability_, not _behavior_.
 If G11 ever requires touching application logic to pass, something upstream
 was accidentally coupled to "runs on localhost" and should be fixed at the
 source rather than patched here.

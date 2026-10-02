@@ -20,12 +20,14 @@ type Harness = {
 async function startHarness(
   checkinLimit = 10,
   now?: () => number,
+  trustProxy = false,
 ): Promise<Harness> {
   const db = openDatabase(":memory:");
   const logs: LogEntry[] = [];
   const app = createApp(db, (entry) => logs.push(entry), {
     checkinLimit,
     now,
+    trustProxy,
   });
   app.get("/test-auth", requireAuth(db), (c) =>
     c.json({ agent_id: c.get("agent").agentId }),
@@ -257,4 +259,38 @@ it("G1.8 per-IP throttle trips on the 11th check-in in a minute", async () => {
   time += 60_001;
   const afterWindow = await checkin(base);
   expect(afterWindow.status).toBe(201);
+});
+
+it("trustProxy buckets check-ins by CF-Connecting-IP", async () => {
+  const { base } = await startHarness(2, undefined, true);
+  const via = (ip: string) =>
+    fetch(`${base}/api/checkin`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "CF-Connecting-IP": ip,
+      },
+      body: "{}",
+    }).then((response) => response.status);
+  expect(await via("203.0.113.7")).toBe(201);
+  expect(await via("203.0.113.7")).toBe(201);
+  expect(await via("198.51.100.9")).toBe(201);
+  expect(await via("198.51.100.9")).toBe(201);
+  expect(await via("203.0.113.7")).toBe(429);
+});
+
+it("proxy headers are ignored without trustProxy", async () => {
+  const { base } = await startHarness(2, undefined, false);
+  const via = (ip: string) =>
+    fetch(`${base}/api/checkin`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "CF-Connecting-IP": ip,
+      },
+      body: "{}",
+    }).then((response) => response.status);
+  expect(await via("203.0.113.7")).toBe(201);
+  expect(await via("198.51.100.9")).toBe(201);
+  expect(await via("203.0.113.7")).toBe(429);
 });

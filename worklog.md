@@ -465,3 +465,34 @@ bad_limit` naming the max; `to <= from` is 400).
 
 - Hosted CI green on both runners (runs 36656634954 and 36661958704); G10 fully closed.
 - Next: deployment plan phase (08), then build.
+
+# Sprint 11 (2026-10-01) â€” First deployment (Cloudflare Tunnel)
+
+## What was done
+
+- Installed `cloudflared` via winget; quick tunnel fronted the local
+  server. Process start-on-demand; backups via `VACUUM INTO`.
+- Added env knob `TRUST_PROXY` in src/server.ts / src/http/throttle.ts so
+  the check-in throttle keys on CF-Connecting-IP / X-Forwarded-For when
+  the server is behind a trusted proxy. Untrusted-proxy default: falls
+  back to the peer address so spoofed headers are ignored.
+- Verified public URL end-to-end with a probe script.
+
+## Decisions and why
+
+- Free quick tunnel over a paid VPS: fast enough for a weekend demo,
+  adequately secure for hobby-scale AI-bot traffic, zero cost. Persistent
+  subdomain will need a Cloudflare-fronted domain later.
+- The runtime CVE envelope (11.4 live rollback) deferred: no code delta
+  between the last milestone tag and this deployment so a meaningful
+  rollback can't be produced in-session.
+- SSE keepalive works locally; through the free quick tunnel the stream
+  appears buffered (only first chunk after ~20 s keepalive is visible) â€”
+  the spectator falls back to polling continuously, which is the intended
+  failure mode. Nongeneric SSE preludes on paid/nginx deployments are
+  documented as the fix.
+
+## Gate gap
+
+- G11 recorded as MOSTLY PASS (see gates/G11-2026-10-01.md): 11.4 skipped,
+  11.5 drill equivalent performed.
