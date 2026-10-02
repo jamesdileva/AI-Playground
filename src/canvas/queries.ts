@@ -313,7 +313,7 @@ export function postCanvasOps(
     db
       .transaction(() => {
         const insert = db.prepare(
-          "INSERT INTO canvas_ops (agent_id, handle, op_type, op_json, bounds, created_at, epoch) VALUES (?, ?, ?, ?, ?, ?, ?)",
+          "INSERT INTO canvas_ops (agent_id, handle, op_type, op_json, bounds, created_at, epoch, remixed_from) VALUES (?, ?, ?, ?, ?, ?, ?, NULL)",
         );
         let firstSeq = 0;
         let lastSeq = 0;
@@ -332,6 +332,44 @@ export function postCanvasOps(
           lastSeq = seq;
         }
         return { firstSeq, lastSeq, count: ops.length, created_at: now };
+      })
+      .immediate(),
+  );
+}
+
+export function postRemixedOps(
+  db: Database.Database,
+  agent: { agentId: string; handle: string },
+  ops: CanvasOp[],
+  epoch: number,
+  sourceEpoch: number,
+  now: number = Date.now(),
+): { firstSeq: number; lastSeq: number; count: number; created_at: number } {
+  const stamped = ops.map((op) => ({ ...op, remixed_from: sourceEpoch }));
+  return databaseOperation(() =>
+    db
+      .transaction(() => {
+        const insert = db.prepare(
+          "INSERT INTO canvas_ops (agent_id, handle, op_type, op_json, bounds, created_at, epoch, remixed_from) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        );
+        let firstSeq = 0;
+        let lastSeq = 0;
+        for (const op of stamped) {
+          const inserted = insert.run(
+            agent.agentId,
+            agent.handle,
+            op.op,
+            JSON.stringify(op),
+            JSON.stringify(boundsOf(op)),
+            now,
+            epoch,
+            sourceEpoch,
+          );
+          const seq = Number(inserted.lastInsertRowid);
+          if (firstSeq === 0) firstSeq = seq;
+          lastSeq = seq;
+        }
+        return { firstSeq, lastSeq, count: stamped.length, created_at: now };
       })
       .immediate(),
   );
@@ -417,7 +455,7 @@ export function epochContributors(
     () =>
       db
         .prepare(
-          "SELECT agent_id, handle, MAX(created_at) AS last_at FROM canvas_ops WHERE epoch = ? GROUP BY agent_id",
+          "SELECT agent_id, handle, MAX(created_at) AS last_at FROM canvas_ops WHERE epoch = ? AND remixed_from IS NULL GROUP BY agent_id",
         )
         .all(epoch) as Array<{
         agent_id: string;
@@ -443,7 +481,7 @@ export function hasEpochOp(
     () =>
       db
         .prepare(
-          "SELECT seq FROM canvas_ops WHERE epoch = ? AND agent_id = ? LIMIT 1",
+          "SELECT seq FROM canvas_ops WHERE epoch = ? AND agent_id = ? AND remixed_from IS NULL LIMIT 1",
         )
         .get(epoch, agentId) !== undefined,
   );
@@ -460,6 +498,30 @@ export type GalleryCanvas = {
   finished_at: number;
 };
 
+export function validateCaption(
+  raw: unknown,
+  code: "canvas_invalid" | "plot_invalid" = "canvas_invalid",
+): string {
+  if (raw === undefined) return "";
+  if (typeof raw !== "string") {
+    throw new HttpError(
+      400,
+      code,
+      "Field caption must be a string.",
+      "Send caption as short text, or omit it.",
+    );
+  }
+  if (raw.length > 500) {
+    throw new HttpError(
+      400,
+      code,
+      "Field caption is longer than 500 characters.",
+      "Keep the caption under 500 characters.",
+    );
+  }
+  return raw;
+}
+
 export function commitFinishedEpoch(
   db: Database.Database,
   row: {
@@ -471,6 +533,7 @@ export function commitFinishedEpoch(
     proposedBy: string;
     confirmedBy: string | null;
     finishedAt: number;
+    caption: string;
   },
 ): void {
   databaseOperation(() =>
@@ -490,7 +553,7 @@ export function commitFinishedEpoch(
           );
         }
         db.prepare(
-          "INSERT INTO gallery_canvases (epoch, seq_start, seq_end, snapshot_blob, contributors, proposed_by, confirmed_by, finished_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+          "INSERT INTO gallery_canvases (epoch, seq_start, seq_end, snapshot_blob, contributors, proposed_by, confirmed_by, finished_at, caption) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         ).run(
           row.epoch,
           row.seqStart,
@@ -500,6 +563,7 @@ export function commitFinishedEpoch(
           row.proposedBy,
           row.confirmedBy,
           row.finishedAt,
+          row.caption,
         );
         db.prepare(
           "UPDATE counters SET value = ? WHERE key = 'canvas_epoch'",
@@ -537,6 +601,7 @@ export function galleryCanvas(db: Database.Database, epoch: number) {
             proposed_by: string;
             confirmed_by: string | null;
             finished_at: number;
+            caption: string;
           }
         | undefined,
   );
@@ -550,6 +615,7 @@ export function galleryCanvas(db: Database.Database, epoch: number) {
     proposed_by: row.proposed_by,
     confirmed_by: row.confirmed_by,
     finished_at: row.finished_at,
+    caption: row.caption,
   };
 }
 
@@ -563,12 +629,13 @@ export function listGalleryCanvases(
   seq_end: number;
   contributors: string[];
   finished_at: number;
+  caption: string;
 }> {
   return databaseOperation(() =>
     (
       db
         .prepare(
-          "SELECT epoch, seq_start, seq_end, contributors, finished_at FROM gallery_canvases ORDER BY epoch DESC LIMIT ? OFFSET ?",
+          "SELECT epoch, seq_start, seq_end, contributors, finished_at, caption FROM gallery_canvases ORDER BY epoch DESC LIMIT ? OFFSET ?",
         )
         .all(limit, offset) as Array<{
         epoch: number;
@@ -576,6 +643,7 @@ export function listGalleryCanvases(
         seq_end: number;
         contributors: string;
         finished_at: number;
+        caption: string;
       }>
     ).map((row) => ({
       epoch: row.epoch,
@@ -583,6 +651,7 @@ export function listGalleryCanvases(
       seq_end: row.seq_end,
       contributors: JSON.parse(row.contributors) as string[],
       finished_at: row.finished_at,
+      caption: row.caption,
     })),
   );
 }

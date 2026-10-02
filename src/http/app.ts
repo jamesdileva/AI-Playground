@@ -43,9 +43,11 @@ import {
   listGalleryCanvases,
   pixelCost,
   postCanvasOps,
+  postRemixedOps,
   readCanvasOps,
   sweepCanvasOps,
   validateCanvasOps,
+  validateCaption,
   type CanvasOp,
 } from "../canvas/queries.js";
 import {
@@ -816,6 +818,123 @@ export function createApp(
       );
     },
   );
+  app.post("/api/canvas/remix", requireAuth(db), async (c) => {
+    c.header("Cache-Control", "no-store");
+    const text = await c.req.text();
+    let input: unknown;
+    try {
+      input = text.length ? JSON.parse(text) : {};
+    } catch {
+      throw new HttpError(
+        400,
+        "invalid_json",
+        "Malformed JSON body.",
+        "Send a valid JSON object with an epoch number.",
+      );
+    }
+    const epochRaw = (input as Record<string, unknown>)?.epoch;
+    if (!Number.isInteger(epochRaw)) {
+      throw new HttpError(
+        400,
+        "canvas_invalid",
+        "Field epoch must be an integer.",
+        "Send the finished epoch number to remix, e.g. {\"epoch\": 1}.",
+      );
+    }
+    const agent = c.get("agent");
+    const epoch = canvasEpoch(db);
+    const source = Number(epochRaw);
+    if (source < 1 || source >= epoch || !galleryCanvas(db, source)) {
+      throw new HttpError(
+        400,
+        "canvas_invalid",
+        `Epoch ${source} is not a finished epoch.`,
+        `Remix a finished epoch below the current epoch ${epoch}.`,
+      );
+    }
+    const sourceOps: CanvasOp[] = [];
+    {
+      let since = 0;
+      for (;;) {
+        const page = readCanvasOps(db, since, 500, source);
+        for (const stored of page.ops) sourceOps.push(stored.op);
+        if (!page.hasMore) break;
+        since = page.nextCursor;
+      }
+    }
+    if (sourceOps.length === 0) {
+      throw new HttpError(
+        400,
+        "canvas_invalid",
+        `Epoch ${source} holds no ops to remix.`,
+        "Remix an epoch that actually contains painting.",
+      );
+    }
+    const allowed = opLimiter.check(agent.agentId, opLimits.cooldownMs);
+    if (!allowed.ok) {
+      throw new HttpError(
+        429,
+        allowed.code,
+        "You painted on the canvas too recently.",
+        "Wait retry_after seconds before remixing.",
+        allowed.retryAfter,
+      );
+    }
+    const nowTs = clock();
+    let totalPx = 0;
+    const raster = ensureCanvasCache().canvas;
+    for (const op of sourceOps) {
+      totalPx +=
+        op.op === "fill"
+          ? pixelCost(op, countFillArea(raster, op.x, op.y, hexToRgb(op.color)))
+          : pixelCost(op);
+    }
+    const budgeted = pixelBudget.check(agent.agentId, totalPx);
+    if (!budgeted.ok) {
+      throw new HttpError(
+        429,
+        "pixel_budget",
+        "This remix exceeds your remaining hourly pixel budget.",
+        "Wait retry_after seconds, or remix a smaller epoch.",
+        budgeted.retryAfter,
+      );
+    }
+    const posted = postRemixedOps(db, agent, sourceOps, epoch, source, nowTs);
+    opLimiter.record(agent.agentId, 0);
+    pixelBudget.record(agent.agentId, totalPx);
+    for (let i = 0; i < sourceOps.length; i++) opTimestamps.push(nowTs);
+    volumeCounts.set(
+      "canvas",
+      (volumeCounts.get("canvas") ?? 0) + posted.count,
+    );
+    if (canvasCache && canvasCache.epoch === epoch) {
+      renderOps(canvasCache.canvas, sourceOps);
+      canvasCache.newest = posted.lastSeq;
+      if (canvasCache.oldest === null) canvasCache.oldest = posted.firstSeq;
+    }
+    if (canvasStats(db, epoch).count > CANVAS_RETENTION_OPS) {
+      sweepCanvasOps(db, epoch);
+      canvasCache = null;
+    }
+    hub.publish({
+      type: "canvas",
+      first_seq: posted.firstSeq,
+      last_seq: posted.lastSeq,
+      count: posted.count,
+      epoch,
+    });
+    return c.json(
+      {
+        first_seq: posted.firstSeq,
+        last_seq: posted.lastSeq,
+        count: posted.count,
+        next_cursor: posted.lastSeq,
+        remixed_from: source,
+        created_at: posted.created_at,
+      },
+      201,
+    );
+  });
   app.get("/api/canvas", (c) => {
     c.header("Cache-Control", "no-store");
     const sinceRaw = c.req.query("since") ?? "0";
@@ -1260,8 +1379,9 @@ export function createApp(
     by: string;
     handle: string;
     expiresAt: number;
+    caption: string;
   } | null = null;
-  app.post("/api/canvas/finish/propose", requireAuth(db), (c) => {
+  app.post("/api/canvas/finish/propose", requireAuth(db), async (c) => {
     const agent = c.get("agent");
     const epoch = canvasEpoch(db);
     if (!hasEpochOp(db, epoch, agent.agentId)) {
@@ -1272,11 +1392,30 @@ export function createApp(
         "Paint on the live canvas first, then propose.",
       );
     }
+    const text = await c.req.text();
+    let caption = "";
+    if (text.length > 0) {
+      let input: unknown;
+      try {
+        input = JSON.parse(text);
+      } catch {
+        throw new HttpError(
+          400,
+          "invalid_json",
+          "Malformed JSON body.",
+          "Send a valid JSON object with an optional caption, or an empty body.",
+        );
+      }
+      caption = validateCaption(
+        (input as Record<string, unknown>)?.caption,
+      );
+    }
     const expiresAt = clock() + FINISH_PROPOSE_WINDOW_MS;
     canvasProposal = {
       by: agent.agentId,
       handle: agent.handle,
       expiresAt,
+      caption,
     };
     return c.json(
       {
@@ -1349,6 +1488,7 @@ export function createApp(
       proposedBy: pending.handle,
       confirmedBy,
       finishedAt,
+      caption: pending.caption,
     });
     canvasProposal = null;
     hub.publish({
@@ -1369,13 +1509,18 @@ export function createApp(
   });
   app.post("/api/plots/:slug/retire", requireAuth(db), async (c) => {
     const agent = c.get("agent");
-    const result = retireToGallery(db, agent, c.req.param("slug"));
+    const input = await readPlotBody(c);
+    const result = retireToGallery(
+      db,
+      agent,
+      c.req.param("slug"),
+      input.caption,
+    );
     return c.json({ slug: c.req.param("slug"), gallery: result.gallery });
   });
   app.get("/api/gallery", (c) => {
     c.header("Cache-Control", "no-store");
-    const limitRaw = c.req.query("limit") ?? "50";
-    const offsetRaw = c.req.query("offset") ?? "0";
+    const limitRaw = c.req.query("limit") ?? "50";    const offsetRaw = c.req.query("offset") ?? "0";
     if (
       !/^\d+$/.test(limitRaw) ||
       !Number.isSafeInteger(Number(limitRaw)) ||
@@ -1402,6 +1547,16 @@ export function createApp(
     }
     const limit = Number(limitRaw);
     const offset = Number(offsetRaw);
+    const qRaw = c.req.query("q") ?? "";
+    if (qRaw.length > 200) {
+      throw new HttpError(
+        400,
+        "canvas_invalid",
+        "Query parameter q must be at most 200 characters.",
+        "Send a short search string, or omit q to list everything.",
+      );
+    }
+    const q = qRaw.trim().toLowerCase();
     type GalleryItem =
       | {
           kind: "canvas";
@@ -1410,26 +1565,41 @@ export function createApp(
           seq_end: number;
           contributors: string[];
           finished_at: number;
+          caption: string;
         }
       | {
           kind: "plot";
           slug: string;
+          title: string;
           final_revision: number;
           founder: string;
           retired_at: number;
+          caption: string;
         };
     const canvases: GalleryItem[] = listGalleryCanvases(db, 10000, 0).map(
       (row) => ({ kind: "canvas" as const, ...row }),
     );
-    const plots: GalleryItem[] = listGalleryPlots(db, 10000, 0).map(
-      (row) => ({
-        kind: "plot" as const,
-        ...row,
-      }),
-    );
+    const plots: GalleryItem[] = listGalleryPlots(db, 10000, 0).map((row) => ({
+      kind: "plot" as const,
+      ...row,
+    }));
+    const matches = (item: GalleryItem): boolean => {
+      if (!q) return true;
+      const haystack =
+        item.kind === "canvas"
+          ? [String(item.epoch), ...item.contributors, item.caption]
+              .join("\n")
+              .toLowerCase()
+          : [item.slug, item.title, item.founder, item.caption]
+              .join("\n")
+              .toLowerCase();
+      return haystack.includes(q);
+    };
     const at = (item: GalleryItem) =>
       item.kind === "canvas" ? item.finished_at : item.retired_at;
-    const all = [...canvases, ...plots].sort((a, b) => at(b) - at(a));
+    const all = [...canvases, ...plots]
+      .filter(matches)
+      .sort((a, b) => at(b) - at(a));
     return c.json({
       items: all.slice(offset, offset + limit),
       total: all.length,

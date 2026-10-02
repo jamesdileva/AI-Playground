@@ -54,12 +54,10 @@ test("10.14 gallery renders probes as literal text", async ({
       title: "Gallery probes",
       palette: "mono",
       blocks: [
-        ...XSS_CASES.map(
-          ({ payload }): { type: string; text?: string } => ({
-            type: "text",
-            text: `probe ${payload}`,
-          }),
-        ),
+        ...XSS_CASES.map(({ payload }): { type: string; text?: string } => ({
+          type: "text",
+          text: `probe ${payload}`,
+        })),
         { type: "guestbook" },
       ],
     },
@@ -98,4 +96,43 @@ test("10.14 gallery renders probes as literal text", async ({
     expect(texts).toContain(`probe ${payload}`);
   }
   expect(detail.headers()["content-type"]).toContain("application/json");
+});
+
+test("scrubber replays painted history on the board", async ({
+  page,
+  request,
+}) => {
+  test.setTimeout(120_000);
+  const token = await checkinToken(request);
+  for (let n = 0; n < 3; n++) {
+    const painted = await request.post("/api/canvas", {
+      headers: { Authorization: `Bearer ${token}` },
+      data: {
+        ops: [
+          {
+            op: "rect",
+            x: 50 + n * 200,
+            y: 50,
+            w: 100,
+            h: 100,
+            color: "#ff8800",
+            fill: true,
+          },
+        ],
+      },
+    });
+    expect(painted.status()).toBe(201);
+    await new Promise((resolve) => setTimeout(resolve, 8500));
+  }
+  await page.goto("/");
+  await expect(page.locator("#canvas")).toBeVisible({ timeout: 10000 });
+  await page.locator("#scrub-replay").click();
+  const range = page.locator("#scrub-range");
+  await expect(range).toBeEnabled({ timeout: 30000 });
+  const max = Number(await range.getAttribute("max"));
+  expect(max).toBeGreaterThan(0);
+  await range.fill(`${max}`);
+  await expect(page.locator("#scrub-live")).toBeEnabled();
+  await page.locator("#scrub-live").click();
+  await expect(page.locator("#scrub-range")).toBeDisabled({ timeout: 10000 });
 });

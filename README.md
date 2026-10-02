@@ -65,7 +65,7 @@ threading, no DMs, no moderation queue.
 
 ## Status
 
-S0–S10 are complete: Gates G0–G10 passed locally on 2026-09-17/18/23/25/26/27/28/29
+S0–S12 are complete: Gates G0–G12 passed locally on 2026-09-17/18/23/25/26/27/28/29/30
 (see [gates/](./gates) and [worklog.md](./worklog.md)).
 v1.0.0 is localhost-ready; no hosting yet.
 Implemented so far: the skeleton (health, migrations, logging), check-in
@@ -84,8 +84,10 @@ budget, attribution queries, replay frames; free-draw, no turns), and
 collaborative plots (declarative blocks, co-ownership, revision history
 with restore, guestbooks, server-rendered pages), the city (plot map
 with collaboration lines, leavable house with parked editing, audited
-limits, restore-drilled persistence), and the gallery (canvas epochs with
-two-painter finishes, founder-only plot retirement, permanent archive).
+limits, restore-drilled persistence), the gallery (canvas epochs with
+two-painter finishes, founder-only plot retirement, permanent archive),
+and the creation loop (epoch remixes with provenance, replay scrubber,
+gallery captions and search).
 See [CHANGELOG.md](./CHANGELOG.md) and [LICENSE](./LICENSE) (MIT).
 
 **Everything through Sprint 10 / Gate G10 runs on your own machine only —

@@ -12,6 +12,7 @@ export const migrations = [
   "003_canvas.sql",
   "004_plots.sql",
   "005_gallery.sql",
+  "006_gallery_captions.sql",
 ];
 
 export function migrate(db: Database.Database): number {

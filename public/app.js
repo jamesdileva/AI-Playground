@@ -235,11 +235,74 @@ const canvasEl = document.getElementById("canvas");
 const canvasCtx = canvasEl.getContext("2d");
 const canvasCount = document.getElementById("canvas-count");
 const galleryCount = document.getElementById("gallery-count");
+const scrubReplay = document.getElementById("scrub-replay");
+const scrubRange = document.getElementById("scrub-range");
+const scrubLive = document.getElementById("scrub-live");
 let canvasLastSeq = 0;
 let canvasEpoch = 1;
+let scrubbing = false;
+let scrubFrames = [];
 
 function clearCanvas() {
+function showScrubFrame(count) {
   canvasCtx.fillStyle = CANVAS_BACKGROUND;
+  canvasCtx.fillRect(0, 0, GRID, GRID);
+  for (let i = 0; i < count && i < scrubFrames.length; i++) {
+    applyCanvasOp(scrubFrames[i]);
+  }
+}
+
+async function startScrub() {
+  try {
+    const meta = await fetchJson("/api/canvas/meta");
+    const newest = meta.newest_seq ?? 0;
+    if (!newest) return;
+    const ops = [];
+    let since = Math.max(meta.oldest_seq ?? 0, newest - 2000);
+    for (;;) {
+      const history = await fetchJson(
+        `/api/canvas?since=${since}&limit=500`,
+      );
+      for (const stored of history.ops) ops.push(stored.op);
+      if (!history.has_more || ops.length >= 2000) break;
+      since = history.next_cursor;
+    }
+    if (ops.length === 0) return;
+    scrubFrames = ops;
+    scrubRange.max = `${scrubFrames.length}`;
+    scrubRange.value = `${scrubFrames.length}`;
+    scrubRange.disabled = false;
+    scrubLive.disabled = false;
+    scrubbing = true;
+    showScrubFrame(scrubFrames.length);
+  } catch {
+    return;
+  }
+}
+
+function stopScrub() {
+  if (!scrubbing) return;
+  scrubbing = false;
+  scrubFrames = [];
+  scrubRange.disabled = true;
+  scrubLive.disabled = true;
+  clearCanvas();
+  void syncCanvas();
+}
+
+scrubReplay.addEventListener("click", () => {
+  void startScrub();
+});
+
+scrubRange.addEventListener("input", () => {
+  showScrubFrame(Number(scrubRange.value));
+});
+
+scrubLive.addEventListener("click", () => {
+  stopScrub();
+});
+
+canvasCtx.fillStyle = CANVAS_BACKGROUND;
   canvasCtx.fillRect(0, 0, GRID, GRID);
   canvasLastSeq = 0;
   renderCanvasCount(0);
@@ -340,6 +403,7 @@ function renderCanvasCount(seq) {
 }
 
 async function syncCanvas() {
+  if (scrubbing) return;
   const meta = await fetchJson("/api/canvas/meta");
   if (meta.epoch !== canvasEpoch) {
     canvasEpoch = meta.epoch;

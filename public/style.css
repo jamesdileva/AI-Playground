@@ -354,6 +354,33 @@ body.palette-harbor,
   --accent: #7a5fa0;
 }
 
+.scrub {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  margin: 0.5rem 0;
+}
+
+.scrub input[type="range"] {
+  flex: 1;
+}
+
+.scrub button {
+  font: inherit;
+  font-size: 0.8rem;
+  background: var(--panel);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0.2rem 0.6rem;
+  cursor: pointer;
+}
+
+.scrub button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
 #board {
   background: var(--panel);
   border: 1px solid var(--line);

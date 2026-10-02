@@ -754,3 +754,251 @@ it("10.8 killing the server mid-retire never leaves partial state", async () => 
     }
   }
 }, 120_000);
+
+it("12.1 remix replays a finished epoch live with provenance", async () => {
+  const { base } = await startHarness({ opLimits: RELAXED_OPS });
+  const [first, second] = await paintTwo(base);
+  await api(base, "POST", "/api/canvas/finish/propose", first.token);
+  await api(base, "POST", "/api/canvas/finish/confirm", second.token);
+  const mixer = await newAgent(base);
+  const remixed = await api(base, "POST", "/api/canvas/remix", mixer.token, {
+    epoch: 1,
+  });
+  expect(remixed.status).toBe(201);
+  expect(remixed.json).toMatchObject({ remixed_from: 1, count: 2 });
+  const live = (await (await fetch(`${base}/api/canvas?since=0`)).json()) as {
+    epoch: number;
+    ops: Array<{ op: { op: string } & Record<string, unknown> }>;
+  };
+  expect(live.epoch).toBe(2);
+  expect(live.ops).toHaveLength(2);
+  for (const stored of live.ops) {
+    expect(stored.op.remixed_from).toBe(1);
+  }
+  const snapshot = await fetch(`${base}/api/canvas/snapshot`);
+  expect(snapshot.status).toBe(200);
+});
+
+it("12.2 remix of live or missing epochs is rejected", async () => {
+  const { base } = await startHarness({ opLimits: RELAXED_OPS });
+  const [first, second] = await paintTwo(base);
+  const current = await api(base, "POST", "/api/canvas/remix", first.token, {
+    epoch: 1,
+  });
+  expect(current.status).toBe(400);
+  const missing = await api(base, "POST", "/api/canvas/remix", first.token, {
+    epoch: 99,
+  });
+  expect(missing.status).toBe(400);
+  await api(base, "POST", "/api/canvas/finish/propose", first.token);
+  await api(base, "POST", "/api/canvas/finish/confirm", second.token);
+  const unauth = await api(base, "POST", "/api/canvas/remix", undefined, {
+    epoch: 1,
+  });
+  expect(unauth.status).toBe(401);
+});
+
+it("12.3 remixed ops grant no finish rights but cost budget", async () => {
+  const { base } = await startHarness({ opLimits: RELAXED_OPS });
+  const [first, second] = await paintTwo(base);
+  await api(base, "POST", "/api/canvas/finish/propose", first.token);
+  await api(base, "POST", "/api/canvas/finish/confirm", second.token);
+  const mixer = await newAgent(base);
+  expect(
+    (await api(base, "POST", "/api/canvas/remix", mixer.token, { epoch: 1 }))
+      .status,
+  ).toBe(201);
+  const proposer = await api(
+    base,
+    "POST",
+    "/api/canvas/finish/propose",
+    mixer.token,
+  );
+  expect(proposer.status).toBe(400);
+  expect(proposer.json.error).toBe("finish_ineligible");
+});
+
+it("12.3b remix spend counts against the pixel budget", async () => {
+  const { base } = await startHarness({
+    opLimits: RELAXED_OPS,
+    pixelBudgetLimits: {
+      budgetPx: 500,
+      windowMs: 3_600_000,
+    },
+  });
+  const [first, second] = await paintTwo(base);
+  await api(base, "POST", "/api/canvas/finish/propose", first.token);
+  await api(base, "POST", "/api/canvas/finish/confirm", second.token);
+  const mixer = await newAgent(base);
+  const over = await api(base, "POST", "/api/canvas/remix", mixer.token, {
+    epoch: 1,
+  });
+  expect(over.status).toBe(429);
+  expect(over.json.error).toBe("pixel_budget");
+});
+
+it("12.5 captions store, render escaped, and reject overflow", async () => {
+  const { base } = await startHarness({ opLimits: RELAXED_OPS });
+  const [first, second] = await paintTwo(base);
+  const probe = '<img src=x onerror="alert(1)">';
+  const tooLong = await api(
+    base,
+    "POST",
+    "/api/canvas/finish/propose",
+    first.token,
+    {
+      caption: "x".repeat(501),
+    },
+  );
+  expect(tooLong.status).toBe(400);
+  await api(base, "POST", "/api/canvas/finish/propose", first.token, {
+    caption: `sunset study ${probe}`,
+  });
+  await api(base, "POST", "/api/canvas/finish/confirm", second.token);
+  const detail = (await (
+    await fetch(`${base}/api/gallery/canvas/1`)
+  ).json()) as { caption: string };
+  expect(detail.caption).toBe(`sunset study ${probe}`);
+  const founder = await newAgent(base);
+  const created = await api(base, "POST", "/api/plots", founder.token, {
+    title: "Captioned",
+    blocks: [{ type: "text", text: "hi" }],
+  });
+  const slug = created.json.slug as string;
+  const retired = await api(
+    base,
+    "POST",
+    `/api/plots/${slug}/retire`,
+    founder.token,
+    {
+      caption: `about loss ${probe}`,
+    },
+  );
+  expect(retired.status).toBe(200);
+  const archived = (await (
+    await fetch(`${base}/api/gallery/plot/${slug}`)
+  ).json()) as { caption: string };
+  expect(archived.caption).toBe(`about loss ${probe}`);
+  const page = await fetch(`${base}/gallery`);
+  const html = await page.text();
+  expect(html).not.toContain(probe);
+  expect(html).toContain("sunset study");
+  expect(html).toContain("about loss");
+});
+
+it("12.6 gallery search finds by caption, title, and handle", async () => {
+  const { base } = await startHarness({ opLimits: RELAXED_OPS });
+  const [first, second] = await paintTwo(base);
+  await api(base, "POST", "/api/canvas/finish/propose", first.token, {
+    caption: "harbor lights",
+  });
+  await api(base, "POST", "/api/canvas/finish/confirm", second.token);
+  const founder = await newAgent(base);
+  const created = await api(base, "POST", "/api/plots", founder.token, {
+    title: "Lighthouse Log",
+    blocks: [{ type: "text", text: "hi" }],
+  });
+  const slug = created.json.slug as string;
+  await api(base, "POST", `/api/plots/${slug}/retire`, founder.token, {
+    caption: "storm stories",
+  });
+  const byCaption = (await (
+    await fetch(`${base}/api/gallery?q=harbor`)
+  ).json()) as { items: Array<{ kind: string }>; total: number };
+  expect(byCaption.total).toBe(1);
+  expect(byCaption.items[0]).toMatchObject({ kind: "canvas", epoch: 1 });
+  const byTitle = (await (
+    await fetch(`${base}/api/gallery?q=lighthouse`)
+  ).json()) as { total: number };
+  expect(byTitle.total).toBe(1);
+  const byHandle = (await (
+    await fetch(`${base}/api/gallery?q=${founder.handle}`)
+  ).json()) as { total: number };
+  expect(byHandle.total).toBe(1);
+  const missing = (await (
+    await fetch(`${base}/api/gallery?q=zzzz-no-such-thing`)
+  ).json()) as { items: unknown[]; total: number };
+  expect(missing.total).toBe(0);
+  expect(missing.items).toEqual([]);
+  const all = (await (await fetch(`${base}/api/gallery`)).json()) as {
+    total: number;
+  };
+  expect(all.total).toBe(2);
+  const tooLong = await fetch(`${base}/api/gallery?q=${"x".repeat(201)}`);
+  expect(tooLong.status).toBe(400);
+});
+
+it("12.7 migration 006 upgrades a v5 database losslessly", async () => {
+  const { mkdtempSync, rmSync, readFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const Database = (await import("better-sqlite3")).default;
+  const directory = mkdtempSync(join(tmpdir(), "hangout-upgrade-"));
+  try {
+    const path = join(directory, "hangout.db");
+    const old = new Database(path);
+    try {
+      const root = new URL("../migrations/", import.meta.url);
+      for (const file of [
+        "001_init.sql",
+        "002_seed_rooms.sql",
+        "003_canvas.sql",
+        "004_plots.sql",
+        "005_gallery.sql",
+      ]) {
+        old.exec(readFileSync(new URL(file, root), "utf8"));
+        const version = {
+          "001_init.sql": 1,
+          "002_seed_rooms.sql": 2,
+          "003_canvas.sql": 3,
+          "004_plots.sql": 4,
+          "005_gallery.sql": 5,
+        }[file]!;
+        old.pragma(`user_version = ${version}`);
+      }
+      old
+        .prepare(
+          "INSERT INTO canvas_ops (agent_id, handle, op_type, op_json, bounds, created_at, epoch) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .run(
+          "agent-1",
+          "amy",
+          "rect",
+          JSON.stringify({
+            op: "rect",
+            x: 1,
+            y: 1,
+            w: 2,
+            h: 2,
+            color: "#111111",
+            fill: true,
+          }),
+          JSON.stringify([1, 1, 3, 3]),
+          1000,
+          1,
+        );
+    } finally {
+      old.close();
+    }
+    const db = openDatabase(path);
+    try {
+      const { migrations } = await import("../src/database.js");
+      expect(db.pragma("user_version", { simple: true }) as number).toBe(
+        migrations.length,
+      );
+      const columns = db
+        .prepare("PRAGMA table_info(canvas_ops)")
+        .all() as Array<{ name: string }>;
+      expect(columns.map((column) => column.name)).toContain("remixed_from");
+      const ops = db
+        .prepare("SELECT op_json FROM canvas_ops")
+        .all() as Array<{ op_json: string }>;
+      expect(ops).toHaveLength(1);
+      expect(JSON.parse(ops[0]!.op_json)).toMatchObject({ op: "rect" });
+    } finally {
+      if (db.open) db.close();
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});

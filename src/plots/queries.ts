@@ -994,6 +994,7 @@ export function retireToGallery(
   db: Database.Database,
   agent: { agentId: string; handle: string },
   slug: string,
+  captionRaw: unknown = "",
 ): { gallery: string } {
   return databaseOperation(() =>
     db
@@ -1010,15 +1011,34 @@ export function retireToGallery(
         const owners = ownersOf(db, row.id);
         const revision = latestRevision(db, row.id);
         const now = Date.now();
+        if (captionRaw !== undefined && typeof captionRaw !== "string") {
+          failPlot(
+            400,
+            "plot_invalid",
+            "Field caption must be a string.",
+            "Send caption as short text, or omit it.",
+          );
+        }
+        const caption = (captionRaw as string | undefined) ?? "";
+        if (caption.length > 500) {
+          failPlot(
+            400,
+            "plot_invalid",
+            "Field caption is longer than 500 characters.",
+            "Keep the caption under 500 characters.",
+          );
+        }
         db.prepare(
-          "INSERT INTO gallery_plots (original_slug, blocks_json, final_revision, founder, co_owners, retired_at) VALUES (?, ?, ?, ?, ?, ?)",
+          "INSERT INTO gallery_plots (original_slug, title, blocks_json, final_revision, founder, co_owners, retired_at, caption) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         ).run(
           row.slug,
+          row.title,
           row.blocks_json,
           revision,
           agent.handle,
           JSON.stringify(owners),
           now,
+          caption,
         );
         db.prepare("DELETE FROM plot_guestbook WHERE plot_id = ?").run(
           row.id,
@@ -1050,16 +1070,18 @@ export function getGalleryPlot(db: Database.Database, slug: string) {
     () =>
       db
         .prepare(
-          "SELECT original_slug, blocks_json, final_revision, founder, co_owners, retired_at FROM gallery_plots WHERE original_slug = ? ORDER BY retired_at DESC LIMIT 1",
+          "SELECT original_slug, title, blocks_json, final_revision, founder, co_owners, retired_at, caption FROM gallery_plots WHERE original_slug = ? ORDER BY retired_at DESC LIMIT 1",
         )
         .get(slug) as
         | {
             original_slug: string;
+            title: string;
             blocks_json: string;
             final_revision: number;
             founder: string;
             co_owners: string;
             retired_at: number;
+            caption: string;
           }
         | undefined,
   );
@@ -1073,11 +1095,13 @@ export function getGalleryPlot(db: Database.Database, slug: string) {
   }
   return {
     slug: row.original_slug,
+    title: row.title,
     blocks: JSON.parse(row.blocks_json) as PlotBlock[],
     final_revision: row.final_revision,
     founder: row.founder,
     co_owners: JSON.parse(row.co_owners) as string[],
     retired_at: row.retired_at,
+    caption: row.caption,
   };
 }
 
@@ -1087,27 +1111,33 @@ export function listGalleryPlots(
   offset: number,
 ): Array<{
   slug: string;
+  title: string;
   final_revision: number;
   founder: string;
   retired_at: number;
+  caption: string;
 }> {
   return databaseOperation(() =>
     (
       db
         .prepare(
-          "SELECT original_slug AS slug, final_revision, founder, retired_at FROM gallery_plots ORDER BY retired_at DESC, id DESC LIMIT ? OFFSET ?",
+          "SELECT original_slug AS slug, title, final_revision, founder, retired_at, caption FROM gallery_plots ORDER BY retired_at DESC, id DESC LIMIT ? OFFSET ?",
         )
         .all(limit, offset) as Array<{
         slug: string;
+        title: string;
         final_revision: number;
         founder: string;
         retired_at: number;
+        caption: string;
       }>
     ).map((row) => ({
       slug: row.slug,
+      title: row.title,
       final_revision: row.final_revision,
       founder: row.founder,
       retired_at: row.retired_at,
+      caption: row.caption,
     })),
   );
 }

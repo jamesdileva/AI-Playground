@@ -116,14 +116,17 @@ export function renderGalleryPage(
     snapshot_png: string;
     contributors: string[];
     finished_at: number;
+    caption: string;
   }>,
   plots: Array<{
     slug: string;
+    title: string;
     blocks: PlotBlock[];
     founder: string;
     co_owners: string[];
     final_revision: number;
     retired_at: number;
+    caption: string;
   }>,
   plotExists: (slug: string) => boolean,
 ): string {
@@ -132,6 +135,9 @@ export function renderGalleryPage(
       (row) =>
         `<section class="tile"><h2>Canvas epoch ${row.epoch}</h2>` +
         `<img src="data:image/png;base64,${row.snapshot_png}" alt="finished canvas epoch ${row.epoch}" />` +
+        (row.caption
+          ? `<p class="caption">${escapeHtml(row.caption)}</p>`
+          : "") +
         `<p class="tile-meta">seq ${row.seq_start}–${row.seq_end} · ` +
         `by ${row.contributors.map((handle) => escapeHtml(handle)).join(", ")}</p></section>`,
     )
@@ -139,7 +145,10 @@ export function renderGalleryPage(
   const plotTiles = plots
     .map(
       (row) =>
-        `<section class="tile"><h2>${escapeHtml(row.slug)}</h2>` +
+        `<section class="tile"><h2>${escapeHtml(row.title)}</h2>` +
+        (row.caption
+          ? `<p class="caption">${escapeHtml(row.caption)}</p>`
+          : "") +
         `<p class="tile-meta">by ${escapeHtml(row.founder)} · ` +
         `revision ${row.final_revision}</p>` +
         renderBlocks(row.blocks, plotExists, "") +

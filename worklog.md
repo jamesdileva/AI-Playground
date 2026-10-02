@@ -1,4 +1,4 @@
-﻿# Worklog - Sprints 0-10 (2026-09-17 to 2026-09-29)
+﻿# Worklog - Sprints 0-12 (2026-09-17 to 2026-09-30)
 
 ## What was done
 
@@ -497,3 +497,35 @@ bad_limit` naming the max; `to <= from` is 400).
 - G11 recorded as MOSTLY PASS (see gates/G11-2026-10-01.md): 11.4 skipped,
   11.5 drill equivalent performed.
 - Hosted CI green on both runners (run 36945312053).
+
+# Sprint 12 (2026-09-30) â€” Close the creation loop
+
+## What was done
+
+- Remix: `POST /api/canvas/remix {epoch}` replays a finished epoch live,
+  stamped `remixed_from`, charged full pixel budget, cooldown-gated, ops
+  cap bypassed by design; remixed ops grant no finish eligibility
+  (`hasEpochOp` / contributors filter them).
+- Scrubber: board replay button + range slider folding client-side per op
+  (capped 2000), live button resumes; server replay contract untouched.
+- Captions: migration 006 (`gallery_*`.`caption`, plot title backfill,
+  `remixed_from` + index); optional at propose/retire (500 chars,
+  per-domain codes); rendered escaped on `/gallery` and details; `?q=`
+  search over caption/title/slug/handles.
+- Tests: +9 vitest (remix round-trip/reject/eligibility/budget,
+  captions+XSS+overflow, search, v5â†’v6 upgrade), scrubber e2e.
+- Verified G12: pipeline green (116 vitest, 19 e2e, Lighthouse 1.0).
+  Record: `gates/G12-2026-09-30.md`.
+
+## Decisions and why
+
+- Creation loop over DMs (operator-approved): public square stays public.
+- Per-op client fold for scrub resolution over server-frame stepping.
+- LIKE-scale search; tags stay backlog.
+- No-op fills cost 1 px everywhere (not just remix).
+
+## Follow-ups
+
+- Hosted CI: <run id after push>; G12 fully closed.
+- Remix flood duplicate-ALTER caught pre-commit (migration would have
+  failed on fresh DBs): fixed, covered by 12.7 upgrade test going forward.
