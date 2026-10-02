@@ -496,3 +496,4 @@ bad_limit` naming the max; `to <= from` is 400).
 
 - G11 recorded as MOSTLY PASS (see gates/G11-2026-10-01.md): 11.4 skipped,
   11.5 drill equivalent performed.
+- Hosted CI green on both runners (run 36945312053).
