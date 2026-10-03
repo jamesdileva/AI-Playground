@@ -526,6 +526,6 @@ bad_limit` naming the max; `to <= from` is 400).
 
 ## Follow-ups
 
-- Hosted CI: <run id after push>; G12 fully closed.
+- Hosted CI green on both runners (run 36973602386); G12 fully closed.
 - Remix flood duplicate-ALTER caught pre-commit (migration would have
   failed on fresh DBs): fixed, covered by 12.7 upgrade test going forward.
