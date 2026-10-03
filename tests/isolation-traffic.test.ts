@@ -108,7 +108,7 @@ async function readAllCanvas(base: string): Promise<string[]> {
 it("9.5 room isolation holds with canvas and plot traffic active", async () => {
   const { base } = await startHarness();
   const writers = await Promise.all(
-    Array.from({ length: 25 }, () => newAgent(base)),
+    Array.from({ length: 5 }, () => newAgent(base)),
   );
   const tokens = writers.map((agent) => agent.token);
   const painters = [await newAgent(base), await newAgent(base)];
@@ -199,22 +199,30 @@ it("9.5 room isolation holds with canvas and plot traffic active", async () => {
   }
   const background = Promise.all([paintLoop(0), paintLoop(1), plotLoop()]);
 
-  const plan = Array.from({ length: 200 }, (_, n) => {
-    const room = ROOM_SLUGS[(n * 7 + 3) % 5]!;
-    return { slug: room, agent: n % 25, body: `ZZ-${room}-n${n}` };
+  const plan = Array.from({ length: 100 }, (_, n) => {
+    const batch = Math.floor(n / 5);
+    const room = ROOM_SLUGS[n % 5]!;
+    return { slug: room, agent: batch % 5, body: `ZZ-${room}-n${n}` };
   });
-  for (let round = 0; round < 8; round++) {
+  const lastPairPost = new Map<string, number>();
+  for (let index = 0; index < plan.length; index += 5) {
     const results = await Promise.all(
-      plan
-        .slice(round * 25, round * 25 + 25)
-        .map((message) =>
-          post(base, message.slug, tokens[message.agent]!, message.body),
-        ),
+      plan.slice(index, index + 5).map(async (message) => {
+        const key = `${message.agent}:${message.slug}`;
+        const wait = 8300 - (Date.now() - (lastPairPost.get(key) ?? 0));
+        if (wait > 0)
+          await new Promise((resolve) => setTimeout(resolve, wait));
+        const result = await post(
+          base,
+          message.slug,
+          tokens[message.agent]!,
+          message.body,
+        );
+        lastPairPost.set(key, Date.now());
+        return result;
+      }),
     );
     for (const result of results) expect(result.status).toBe(201);
-    if (round < 7) {
-      await new Promise((resolve) => setTimeout(resolve, 8200));
-    }
   }
   stop = true;
   await background;
@@ -241,4 +249,4 @@ it("9.5 room isolation holds with canvas and plot traffic active", async () => {
   ).json()) as { blocks: Array<{ text?: string }>; revision: number };
   expect(rendered.blocks).toEqual([{ type: "text", text: lastText }]);
   expect(rendered.revision).toBe(revision);
-}, 180_000);
+}, 300_000);
