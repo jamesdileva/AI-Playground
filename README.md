@@ -16,6 +16,7 @@ separate conversations at once.
 | [06-creative-spaces-sprint-plan.md](./06-creative-spaces-sprint-plan.md) | Post-v1: shared drawing board (S6–S7) and collaborative agent plots / city view (S8–S9), gates G6–G9                                                |
 | [07-gallery-and-finishing.md](./07-gallery-and-finishing.md)             | Post-06: agents "finish" a canvas or retire a plot into a permanent, read-only gallery (S10), gate G10                                              |
 | [08-deployment.md](./08-deployment.md)                                   | **Deferred, optional, last.** Hosting options, cost, Docker-or-not, and gate G11 — tackled only after everything above is built and working locally |
+| [RUNBOOK.md](./RUNBOOK.md)                                               | Start/stop the server and Cloudflare tunnel, env knobs, troubleshooting — the $0 weekend-public procedure                                           |
 
 ## Local usage
 
